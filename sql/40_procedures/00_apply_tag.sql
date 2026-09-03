@@ -91,14 +91,21 @@ BEGIN
     --    A tag that exists in Snowflake but not in the registry is a shadow
     --    tag: refusing it here is what keeps the taxonomy closed.
     -- ---------------------------------------------------------------------
+    -- Existence is checked with a scalar subquery before the SELECT ... INTO:
+    -- a SELECT ... INTO that matches no rows is not a dependable way to observe
+    -- absence, and the whole guard would be skipped.
+    LET V_REGISTERED NUMBER := (
+        SELECT COUNT(*) FROM GOVERNANCE.CONTROL.TAG_CATALOG
+         WHERE TAG_NAME = UPPER(:P_TAG_NAME));
+
+    IF (V_REGISTERED = 0) THEN
+        RETURN 'REJECTED: ' || :P_TAG_NAME || ' is not a registered enterprise tag.';
+    END IF;
+
     SELECT VALUE_SOURCE, REFERENCE_SET, VALUE_FORMAT_REGEX, OVERRIDE_RULE, STATUS
       INTO :V_VALUE_SOURCE, :V_REFERENCE_SET, :V_FORMAT_REGEX, :V_OVERRIDE_RULE, :V_STATUS
       FROM GOVERNANCE.CONTROL.TAG_CATALOG
      WHERE TAG_NAME = UPPER(:P_TAG_NAME);
-
-    IF (V_VALUE_SOURCE IS NULL) THEN
-        RETURN 'REJECTED: ' || :P_TAG_NAME || ' is not a registered enterprise tag.';
-    END IF;
     IF (V_STATUS = 'RETIRED') THEN
         RETURN 'REJECTED: ' || :P_TAG_NAME || ' is RETIRED and can no longer be assigned.';
     END IF;
@@ -111,10 +118,10 @@ BEGIN
     -- ---------------------------------------------------------------------
     -- 3. The tag must be legal on this object type.
     -- ---------------------------------------------------------------------
-    SELECT REQUIREMENT_LEVEL INTO :V_REQ_LEVEL
-      FROM GOVERNANCE.CONTROL.TAG_REQUIREMENT
-     WHERE TAG_NAME = UPPER(:P_TAG_NAME)
-       AND OBJECT_TYPE = UPPER(:P_OBJECT_TYPE);
+    V_REQ_LEVEL := (
+        SELECT MAX(REQUIREMENT_LEVEL) FROM GOVERNANCE.CONTROL.TAG_REQUIREMENT
+         WHERE TAG_NAME = UPPER(:P_TAG_NAME)
+           AND OBJECT_TYPE = UPPER(:P_OBJECT_TYPE));
 
     IF (V_REQ_LEVEL IS NULL OR V_REQ_LEVEL = 'NOT_APPLICABLE') THEN
         RETURN 'REJECTED: ' || :P_TAG_NAME || ' does not apply to ' ||
@@ -203,13 +210,17 @@ BEGIN
             END IF;
 
             IF (V_OVERRIDE_RULE = 'more_restrictive_only') THEN
-                SELECT ORDINAL_POSITION INTO :V_NEW_ORDINAL
-                  FROM GOVERNANCE.CONTROL.TAG_ALLOWED_VALUE
-                 WHERE TAG_NAME = UPPER(:P_TAG_NAME) AND TAG_VALUE = :P_TAG_VALUE;
+                V_NEW_ORDINAL := (
+                    SELECT MAX(ORDINAL_POSITION)
+                      FROM GOVERNANCE.CONTROL.TAG_ALLOWED_VALUE
+                     WHERE TAG_NAME = UPPER(:P_TAG_NAME)
+                       AND TAG_VALUE = :P_TAG_VALUE);
 
-                SELECT ORDINAL_POSITION INTO :V_PARENT_ORDINAL
-                  FROM GOVERNANCE.CONTROL.TAG_ALLOWED_VALUE
-                 WHERE TAG_NAME = UPPER(:P_TAG_NAME) AND TAG_VALUE = :V_PARENT_VALUE;
+                V_PARENT_ORDINAL := (
+                    SELECT MAX(ORDINAL_POSITION)
+                      FROM GOVERNANCE.CONTROL.TAG_ALLOWED_VALUE
+                     WHERE TAG_NAME = UPPER(:P_TAG_NAME)
+                       AND TAG_VALUE = :V_PARENT_VALUE);
 
                 IF (V_NEW_ORDINAL < V_PARENT_ORDINAL) THEN
                     RETURN 'REJECTED: cannot weaken ' || :P_TAG_NAME || ' from inherited "' ||
@@ -223,36 +234,53 @@ BEGIN
     END IF;
 
     -- ---------------------------------------------------------------------
-    -- 7. Capture the prior value for the audit trail, then apply.
+    -- 7. Injection guard.
+    --
+    --    Snowflake does not accept bind variables in DDL, so the tag value has
+    --    to be interpolated into an ALTER statement. Every value reaching this
+    --    point has already passed step 5 - an allow-list, a reference-data
+    --    lookup, or an anchored regex - and all shipped regexes exclude quotes.
+    --    This block is the belt to that braces: it defends against a future
+    --    free_text tag being added with a loose pattern, which is exactly the
+    --    kind of change that looks harmless in review.
     -- ---------------------------------------------------------------------
+    IF (V_ACTION = 'SET') THEN
+        IF (CONTAINS(:P_TAG_VALUE, '''') OR CONTAINS(:P_TAG_VALUE, ';')
+            OR CONTAINS(:P_TAG_VALUE, '--') OR LENGTH(:P_TAG_VALUE) > 256) THEN
+            RETURN 'REJECTED: tag value contains a quote, a semicolon or a comment ' ||
+                   'marker, or exceeds the 256-character Snowflake limit. ' ||
+                   'Tighten the value_format for ' || :P_TAG_NAME || '.';
+        END IF;
+    END IF;
+
+    -- ---------------------------------------------------------------------
+    -- 8. Capture the prior value for the audit trail, then apply.
+    -- ---------------------------------------------------------------------
+    -- SYSTEM$GET_TAG takes the object DOMAIN, which uses spaces rather than
+    -- underscores: MATERIALIZED_VIEW -> 'MATERIALIZED VIEW'.
+    V_OBJECT_KEYWORD := REPLACE(UPPER(:P_OBJECT_TYPE), '_', ' ');
+
     IF (UPPER(:P_OBJECT_TYPE) = 'COLUMN') THEN
         V_OLD_VALUE := SYSTEM$GET_TAG(:V_TAG_FQN,
                                       :P_OBJECT_FQN || '.' || :P_COLUMN_NAME, 'COLUMN');
         V_STMT := 'ALTER TABLE ' || :P_OBJECT_FQN ||
                   ' MODIFY COLUMN ' || :P_COLUMN_NAME || ' ' || V_ACTION || ' TAG ' ||
-                  V_TAG_FQN || IFF(V_ACTION = 'SET', ' = ?', '');
+                  V_TAG_FQN || IFF(V_ACTION = 'SET', ' = ''' || :P_TAG_VALUE || '''', '');
     ELSE
-        -- MATERIALIZED_VIEW -> 'MATERIALIZED VIEW', ICEBERG_TABLE -> 'ICEBERG TABLE', ...
-        V_OBJECT_KEYWORD := REPLACE(UPPER(:P_OBJECT_TYPE), '_', ' ');
-        V_OLD_VALUE := SYSTEM$GET_TAG(:V_TAG_FQN, :P_OBJECT_FQN, UPPER(:P_OBJECT_TYPE));
+        V_OLD_VALUE := SYSTEM$GET_TAG(:V_TAG_FQN, :P_OBJECT_FQN, :V_OBJECT_KEYWORD);
         V_STMT := 'ALTER ' || V_OBJECT_KEYWORD || ' ' || :P_OBJECT_FQN || ' ' ||
-                  V_ACTION || ' TAG ' || V_TAG_FQN || IFF(V_ACTION = 'SET', ' = ?', '');
+                  V_ACTION || ' TAG ' || V_TAG_FQN ||
+                  IFF(V_ACTION = 'SET', ' = ''' || :P_TAG_VALUE || '''', '');
     END IF;
 
     IF (V_OLD_VALUE = :P_TAG_VALUE) THEN
         RETURN 'NO-OP: ' || :P_TAG_NAME || ' is already "' || :P_TAG_VALUE || '".';
     END IF;
 
-    -- Bind the value rather than concatenating it: a tag value is user-supplied
-    -- text and must never be interpolated into DDL.
-    IF (V_ACTION = 'SET') THEN
-        EXECUTE IMMEDIATE :V_STMT USING (P_TAG_VALUE);
-    ELSE
-        EXECUTE IMMEDIATE :V_STMT;
-    END IF;
+    EXECUTE IMMEDIATE :V_STMT;
 
     -- ---------------------------------------------------------------------
-    -- 8. Audit.
+    -- 9. Audit.
     -- ---------------------------------------------------------------------
     INSERT INTO GOVERNANCE.CONTROL.TAG_CHANGE_LOG
         (CHANGED_BY, CHANGED_BY_ROLE, ACTION, OBJECT_DATABASE, OBJECT_SCHEMA,

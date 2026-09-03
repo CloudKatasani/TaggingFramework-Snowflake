@@ -72,7 +72,7 @@ LEFT JOIN VW_OBJECT_TAG_PROFILE p
 LEFT JOIN GOVERNANCE.CONTROL.RATE_CARD r
        ON m.START_TIME::DATE BETWEEN r.EFFECTIVE_FROM
                                  AND COALESCE(r.EFFECTIVE_TO, '9999-12-31'::DATE)
-GROUP BY 1, 2, 3, 4, 5, 6, 7, p.COST_CENTER;
+GROUP BY 1, 2, 3, 4, 5, 6, 7;
 
 -- -----------------------------------------------------------------------------
 -- Per-query attribution: splits a shared warehouse across the consuming tags.
@@ -84,31 +84,36 @@ GROUP BY 1, 2, 3, 4, 5, 6, 7, p.COST_CENTER;
 CREATE OR REPLACE VIEW VW_QUERY_COST_ATTRIBUTION
 COMMENT = 'Per-query credit attribution, keyed to the consuming role and warehouse tags.'
 AS
+-- QUERY_ATTRIBUTION_HISTORY already carries WAREHOUSE_NAME, USER_NAME and
+-- ROLE_NAME, so no join to QUERY_HISTORY is needed. That join would be the most
+-- expensive part of this view for no additional information.
 SELECT
-    DATE_TRUNC('DAY', q.START_TIME)::DATE          AS USAGE_DATE,
-    q.WAREHOUSE_NAME,
-    q.USER_NAME,
-    q.ROLE_NAME,
+    DATE_TRUNC('DAY', qa.START_TIME)::DATE         AS USAGE_DATE,
+    qa.WAREHOUSE_NAME,
+    qa.USER_NAME,
+    qa.ROLE_NAME,
+    -- Attribution follows the CONSUMING role, not the queried object: reading a
+    -- shared reference table must not bill the team that publishes it, or the
+    -- mesh penalises exactly the behaviour it needs to encourage.
     COALESCE(rp.BUSINESS_UNIT, wp.BUSINESS_UNIT)   AS BUSINESS_UNIT,
     COALESCE(rp.COST_CENTER,   wp.COST_CENTER)     AS COST_CENTER,
     wp.ENVIRONMENT,
     COUNT(*)                                       AS QUERY_COUNT,
     SUM(qa.CREDITS_ATTRIBUTED_COMPUTE)             AS CREDITS_ATTRIBUTED,
     SUM(qa.CREDITS_ATTRIBUTED_COMPUTE) * MAX(rc.CREDIT_PRICE) AS COST,
-    -- Attribution falling back to the warehouse means the consuming role is
-    -- untagged: accurate at warehouse level, imprecise below it.
-    (rp.COST_CENTER IS NULL)                       AS FELL_BACK_TO_WAREHOUSE
+    -- Falling back to the warehouse means the consuming role is untagged:
+    -- accurate at warehouse level, imprecise below it. Surfaced rather than
+    -- hidden, because it is the specific gap a steward can close.
+    BOOLOR_AGG(rp.COST_CENTER IS NULL)             AS FELL_BACK_TO_WAREHOUSE
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY qa
-JOIN SNOWFLAKE.ACCOUNT_USAGE.QUERY_HISTORY q
-  ON q.QUERY_ID = qa.QUERY_ID
 LEFT JOIN VW_OBJECT_TAG_PROFILE rp
-       ON rp.OBJECT_TYPE = 'ROLE' AND rp.OBJECT_NAME = q.ROLE_NAME
+       ON rp.OBJECT_TYPE = 'ROLE' AND rp.OBJECT_NAME = qa.ROLE_NAME
 LEFT JOIN VW_OBJECT_TAG_PROFILE wp
-       ON wp.OBJECT_TYPE = 'WAREHOUSE' AND wp.OBJECT_NAME = q.WAREHOUSE_NAME
+       ON wp.OBJECT_TYPE = 'WAREHOUSE' AND wp.OBJECT_NAME = qa.WAREHOUSE_NAME
 LEFT JOIN GOVERNANCE.CONTROL.RATE_CARD rc
-       ON q.START_TIME::DATE BETWEEN rc.EFFECTIVE_FROM
-                                 AND COALESCE(rc.EFFECTIVE_TO, '9999-12-31'::DATE)
-GROUP BY 1, 2, 3, 4, 5, 6, 7, rp.COST_CENTER;
+       ON qa.START_TIME::DATE BETWEEN rc.EFFECTIVE_FROM
+                                  AND COALESCE(rc.EFFECTIVE_TO, '9999-12-31'::DATE)
+GROUP BY 1, 2, 3, 4, 5, 6, 7;
 
 -- -----------------------------------------------------------------------------
 -- Storage, attributed through database and schema tags.
@@ -144,7 +149,7 @@ LEFT JOIN GOVERNANCE.CONTROL.RATE_CARD r
        ON CURRENT_DATE() BETWEEN r.EFFECTIVE_FROM
                              AND COALESCE(r.EFFECTIVE_TO, '9999-12-31'::DATE)
 WHERE s.DELETED = FALSE
-GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, p.RETENTION_CLASS;
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8;
 
 -- -----------------------------------------------------------------------------
 -- The monthly chargeback statement.

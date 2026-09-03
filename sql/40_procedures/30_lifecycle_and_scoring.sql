@@ -34,8 +34,12 @@ COMMENT = 'Rewrites ENVIRONMENT (and clears certifications) on a freshly cloned 
 AS
 $$
 DECLARE
-    V_FIXED  NUMBER := 0;
-    V_RESULT STRING;
+    V_FIXED   NUMBER := 0;
+    V_DB      STRING;
+    V_SCHEMA  STRING;
+    V_NAME    STRING;
+    V_TYPE    STRING;
+    V_FQN     STRING;
     C_WRONG CURSOR FOR
         SELECT OBJECT_DATABASE, OBJECT_SCHEMA, OBJECT_NAME, OBJECT_TYPE
         FROM GOVERNANCE.REPORTING.VW_EFFECTIVE_TAG
@@ -45,15 +49,24 @@ DECLARE
           AND EFFECTIVE_VALUE <> :P_CORRECT_ENVIRONMENT;
 BEGIN
     FOR rec IN C_WRONG DO
+        V_DB     := rec.OBJECT_DATABASE;
+        V_SCHEMA := rec.OBJECT_SCHEMA;
+        V_NAME   := rec.OBJECT_NAME;
+        V_TYPE   := rec.OBJECT_TYPE;
+
+        -- A database's own FQN is just its name; a schema's is db.schema; every
+        -- other object is db.schema.name.
+        V_FQN := CASE
+            WHEN V_TYPE = 'DATABASE' THEN V_DB
+            WHEN V_TYPE = 'SCHEMA'   THEN V_DB || '.' || V_NAME
+            ELSE V_DB || '.' || V_SCHEMA || '.' || V_NAME
+        END;
+
         IF (NOT P_DRY_RUN) THEN
-            V_RESULT := (CALL SP_APPLY_TAG(
-                rec.OBJECT_TYPE,
-                rec.OBJECT_DATABASE ||
-                    COALESCE('.' || rec.OBJECT_SCHEMA, '') ||
-                    IFF(rec.OBJECT_TYPE IN ('DATABASE'), '', '.' || rec.OBJECT_NAME),
-                NULL, 'ENVIRONMENT', :P_CORRECT_ENVIRONMENT,
+            CALL SP_APPLY_TAG(:V_TYPE, :V_FQN, NULL,
+                'ENVIRONMENT', :P_CORRECT_ENVIRONMENT,
                 'Clone remediation: object was cloned from another environment.',
-                NULL, 'REMEDIATION'));
+                NULL, 'REMEDIATION');
         END IF;
         V_FIXED := V_FIXED + 1;
     END FOR;
@@ -199,18 +212,24 @@ DECLARE
     V_ASSIGNMENTS NUMBER;
     V_POLICIES    NUMBER;
     V_UNSET       NUMBER := 0;
-    V_RESULT      STRING;
+    V_DB          STRING;
+    V_SCHEMA      STRING;
+    V_NAME        STRING;
+    V_COLUMN      STRING;
+    V_TYPE        STRING;
+    V_FQN         STRING;
     C_ASSIGNED CURSOR FOR
         SELECT OBJECT_DATABASE, OBJECT_SCHEMA, OBJECT_NAME, COLUMN_NAME, OBJECT_TYPE
         FROM GOVERNANCE.REPORTING.VW_TAG_ASSIGNMENT
         WHERE TAG_NAME = :P_TAG_NAME;
 BEGIN
-    SELECT COUNT(*) INTO :V_ASSIGNMENTS
-      FROM GOVERNANCE.REPORTING.VW_TAG_ASSIGNMENT WHERE TAG_NAME = :P_TAG_NAME;
+    V_ASSIGNMENTS := (SELECT COUNT(*)
+                        FROM GOVERNANCE.REPORTING.VW_TAG_ASSIGNMENT
+                       WHERE TAG_NAME = :P_TAG_NAME);
 
-    SELECT COUNT(*) INTO :V_POLICIES
-      FROM GOVERNANCE.CONTROL.TAG_POLICY_BINDING
-     WHERE TAG_NAME = :P_TAG_NAME AND IS_ACTIVE;
+    V_POLICIES := (SELECT COUNT(*)
+                     FROM GOVERNANCE.CONTROL.TAG_POLICY_BINDING
+                    WHERE TAG_NAME = :P_TAG_NAME AND IS_ACTIVE);
 
     IF (V_POLICIES > 0) THEN
         RETURN 'BLOCKED: ' || :P_TAG_NAME || ' still has ' || V_POLICIES ||
@@ -224,12 +243,21 @@ BEGIN
     END IF;
 
     FOR rec IN C_ASSIGNED DO
-        V_RESULT := (CALL SP_APPLY_TAG(
-            rec.OBJECT_TYPE,
-            rec.OBJECT_DATABASE || COALESCE('.' || rec.OBJECT_SCHEMA, '') ||
-                COALESCE('.' || rec.OBJECT_NAME, ''),
-            rec.COLUMN_NAME, :P_TAG_NAME, NULL,
-            'Tag retirement sweep.', NULL, 'REMEDIATION'));
+        V_DB     := rec.OBJECT_DATABASE;
+        V_SCHEMA := rec.OBJECT_SCHEMA;
+        V_NAME   := rec.OBJECT_NAME;
+        V_COLUMN := rec.COLUMN_NAME;
+        V_TYPE   := rec.OBJECT_TYPE;
+
+        V_FQN := CASE
+            WHEN V_TYPE = 'DATABASE'  THEN V_DB
+            WHEN V_TYPE = 'SCHEMA'    THEN V_DB || '.' || V_NAME
+            WHEN V_TYPE = 'WAREHOUSE' THEN V_NAME
+            ELSE V_DB || '.' || V_SCHEMA || '.' || V_NAME
+        END;
+
+        CALL SP_APPLY_TAG(:V_TYPE, :V_FQN, :V_COLUMN, :P_TAG_NAME, NULL,
+            'Tag retirement sweep.', NULL, 'REMEDIATION');
         V_UNSET := V_UNSET + 1;
     END FOR;
 

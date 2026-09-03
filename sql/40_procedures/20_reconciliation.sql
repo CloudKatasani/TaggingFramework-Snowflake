@@ -40,6 +40,14 @@ DECLARE
     V_SKIPPED   NUMBER := 0;
     V_STMT      STRING;
     V_FQN       STRING;
+    -- Cursor fields are copied into locals before being used inside a SQL
+    -- statement. Referencing rec.COLUMN directly from a nested INSERT is not
+    -- dependable across Snowflake Scripting versions; a local bound with ':' is.
+    V_DB        STRING;
+    V_SCHEMA    STRING;
+    V_NAME      STRING;
+    V_TYPE      STRING;
+    V_BU_COLUMN STRING;
     C_TARGETS CURSOR FOR
         SELECT p.OBJECT_DATABASE, p.OBJECT_SCHEMA, p.OBJECT_NAME, p.OBJECT_TYPE,
                col.COLUMN_NAME AS BU_COLUMN
@@ -63,16 +71,20 @@ DECLARE
           AND pr.POLICY_NAME IS NULL;
 BEGIN
     FOR rec IN C_TARGETS DO
-        V_FQN := rec.OBJECT_DATABASE || '.' || rec.OBJECT_SCHEMA || '.' || rec.OBJECT_NAME;
+        V_DB        := rec.OBJECT_DATABASE;
+        V_SCHEMA    := rec.OBJECT_SCHEMA;
+        V_NAME      := rec.OBJECT_NAME;
+        V_TYPE      := rec.OBJECT_TYPE;
+        V_BU_COLUMN := rec.BU_COLUMN;
+        V_FQN       := V_DB || '.' || V_SCHEMA || '.' || V_NAME;
 
-        IF (rec.BU_COLUMN IS NULL) THEN
+        IF (V_BU_COLUMN IS NULL) THEN
             V_SKIPPED := V_SKIPPED + 1;
             INSERT INTO GOVERNANCE.CONTROL.COMPLIANCE_FINDING
                 (SCAN_ID, SCAN_AT, OBJECT_DATABASE, OBJECT_SCHEMA, OBJECT_NAME,
                  OBJECT_TYPE, TAG_NAME, FINDING_TYPE, SEVERITY, DETAIL)
-            SELECT 'RAP-RECONCILE', CURRENT_TIMESTAMP(), rec.OBJECT_DATABASE,
-                   rec.OBJECT_SCHEMA, rec.OBJECT_NAME, rec.OBJECT_TYPE,
-                   'ROW_ACCESS_REQUIRED', 'POLICY_DRIFT', 'CRITICAL',
+            SELECT 'RAP-RECONCILE', CURRENT_TIMESTAMP(), :V_DB, :V_SCHEMA, :V_NAME,
+                   :V_TYPE, 'ROW_ACCESS_REQUIRED', 'POLICY_DRIFT', 'CRITICAL',
                    'Declares ROW_ACCESS_REQUIRED = YES but has no BUSINESS_UNIT ' ||
                    'column, so the standard row access policy cannot bind. The ' ||
                    'table is UNPROTECTED. Either add the dimension column or ' ||
@@ -80,17 +92,17 @@ BEGIN
             CONTINUE;
         END IF;
 
-        V_STMT := 'ALTER ' || REPLACE(rec.OBJECT_TYPE, '_', ' ') || ' ' || V_FQN ||
+        V_STMT := 'ALTER ' || REPLACE(V_TYPE, '_', ' ') || ' ' || V_FQN ||
                   ' ADD ROW ACCESS POLICY GOVERNANCE.POLICIES.RAP_BUSINESS_UNIT_SCOPE' ||
-                  ' ON (' || rec.BU_COLUMN || ')';
+                  ' ON (' || V_BU_COLUMN || ')';
 
         IF (NOT P_DRY_RUN) THEN
             EXECUTE IMMEDIATE :V_STMT;
             INSERT INTO GOVERNANCE.CONTROL.TAG_CHANGE_LOG
                 (ACTION, OBJECT_DATABASE, OBJECT_SCHEMA, OBJECT_NAME, OBJECT_TYPE,
                  TAG_NAME, NEW_VALUE, CHANGE_REASON, SOURCE)
-            SELECT 'SET', rec.OBJECT_DATABASE, rec.OBJECT_SCHEMA, rec.OBJECT_NAME,
-                   rec.OBJECT_TYPE, 'ROW_ACCESS_REQUIRED', 'RAP_BUSINESS_UNIT_SCOPE',
+            SELECT 'SET', :V_DB, :V_SCHEMA, :V_NAME, :V_TYPE,
+                   'ROW_ACCESS_REQUIRED', 'RAP_BUSINESS_UNIT_SCOPE',
                    'Row access policy applied by tag reconciliation.', 'REMEDIATION';
         END IF;
         V_APPLIED := V_APPLIED + 1;
@@ -133,7 +145,11 @@ $$
 DECLARE
     V_APPLIED  NUMBER := 0;
     V_CONFLICT NUMBER := 0;
-    V_RESULT   STRING;
+    V_DB       STRING;
+    V_SCHEMA   STRING;
+    V_NAME     STRING;
+    V_COLUMN   STRING;
+    V_FQN      STRING;
     C_PROPOSED CURSOR FOR
         SELECT OBJECT_DATABASE, OBJECT_SCHEMA, OBJECT_NAME, COLUMN_NAME
         FROM GOVERNANCE.CONTROL.CLASSIFICATION_RECONCILIATION
@@ -189,22 +205,30 @@ BEGIN
     -- 2. Apply the classifier's proposal where no human has ruled.
     IF (P_AUTO_APPLY) THEN
         FOR rec IN C_PROPOSED DO
-            V_RESULT := (CALL SP_APPLY_TAG(
-                'COLUMN',
-                rec.OBJECT_DATABASE || '.' || rec.OBJECT_SCHEMA || '.' || rec.OBJECT_NAME,
-                rec.COLUMN_NAME,
-                'PII', 'YES',
-                'Auto-applied from Snowflake classification (privacy category).',
-                NULL, 'AUTO_CLASSIFY'));
+            V_DB     := rec.OBJECT_DATABASE;
+            V_SCHEMA := rec.OBJECT_SCHEMA;
+            V_NAME   := rec.OBJECT_NAME;
+            V_COLUMN := rec.COLUMN_NAME;
+            V_FQN    := V_DB || '.' || V_SCHEMA || '.' || V_NAME;
 
-            IF (STARTSWITH(V_RESULT, 'OK')) THEN
+            CALL SP_APPLY_TAG('COLUMN', :V_FQN, :V_COLUMN, 'PII', 'YES',
+                'Auto-applied from Snowflake classification (privacy category).',
+                NULL, 'AUTO_CLASSIFY');
+
+            -- Success is confirmed by reading the tag back rather than by
+            -- parsing the procedure's return string. SP_APPLY_TAG returns a
+            -- rejection message instead of raising, so a failed apply would
+            -- otherwise be recorded as AUTO_APPLIED and the column would sit
+            -- unmasked behind a reconciliation row claiming it was handled.
+            IF (SYSTEM$GET_TAG('GOVERNANCE.TAGS.PII',
+                               :V_FQN || '.' || :V_COLUMN, 'COLUMN') = 'YES') THEN
                 V_APPLIED := V_APPLIED + 1;
                 UPDATE GOVERNANCE.CONTROL.CLASSIFICATION_RECONCILIATION
                    SET RECONCILIATION_STATE = 'AUTO_APPLIED', ENTERPRISE_PII = 'YES'
-                 WHERE OBJECT_DATABASE = rec.OBJECT_DATABASE
-                   AND OBJECT_SCHEMA   = rec.OBJECT_SCHEMA
-                   AND OBJECT_NAME     = rec.OBJECT_NAME
-                   AND COLUMN_NAME     = rec.COLUMN_NAME;
+                 WHERE OBJECT_DATABASE = :V_DB
+                   AND OBJECT_SCHEMA   = :V_SCHEMA
+                   AND OBJECT_NAME     = :V_NAME
+                   AND COLUMN_NAME     = :V_COLUMN;
             END IF;
         END FOR;
     END IF;

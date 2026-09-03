@@ -53,71 +53,140 @@ WHERE tr.TAG_DATABASE = 'GOVERNANCE'
 CREATE OR REPLACE VIEW VW_OBJECT_INVENTORY
 COMMENT = 'All taggable objects in scope of the framework, normalised to one shape.'
 AS
+-- Every branch aliases all seven columns explicitly and casts its NULLs. Relying
+-- on positional UNION with unnamed literals produces duplicate auto-generated
+-- column names inside a CTE and leaves NULL columns untyped, both of which fail
+-- in ways that are tedious to diagnose.
 WITH DATABASES AS (
-    SELECT DATABASE_NAME AS OBJECT_DATABASE, NULL AS OBJECT_SCHEMA,
-           DATABASE_NAME AS OBJECT_NAME, NULL AS COLUMN_NAME,
-           'DATABASE' AS OBJECT_TYPE, DATABASE_OWNER AS OBJECT_OWNER,
-           CREATED AS CREATED_ON
+    SELECT DATABASE_NAME      AS OBJECT_DATABASE,
+           NULL::STRING       AS OBJECT_SCHEMA,
+           DATABASE_NAME      AS OBJECT_NAME,
+           NULL::STRING       AS COLUMN_NAME,
+           'DATABASE'::STRING AS OBJECT_TYPE,
+           DATABASE_OWNER     AS OBJECT_OWNER,
+           CREATED            AS CREATED_ON
     FROM SNOWFLAKE.ACCOUNT_USAGE.DATABASES
     WHERE DELETED IS NULL
-      AND TYPE <> 'IMPORTED DATABASE'          -- shares are governed at the share
+      AND TYPE <> 'IMPORTED DATABASE'          -- inbound shares are governed at the share
       AND DATABASE_NAME NOT IN ('SNOWFLAKE', 'SNOWFLAKE_SAMPLE_DATA')
 ),
 SCHEMAS AS (
-    SELECT CATALOG_NAME, SCHEMA_NAME, SCHEMA_NAME, NULL,
-           'SCHEMA', SCHEMA_OWNER, CREATED
+    SELECT CATALOG_NAME      AS OBJECT_DATABASE,
+           SCHEMA_NAME       AS OBJECT_SCHEMA,
+           SCHEMA_NAME       AS OBJECT_NAME,
+           NULL::STRING      AS COLUMN_NAME,
+           'SCHEMA'::STRING  AS OBJECT_TYPE,
+           SCHEMA_OWNER      AS OBJECT_OWNER,
+           CREATED           AS CREATED_ON
     FROM SNOWFLAKE.ACCOUNT_USAGE.SCHEMATA
     WHERE DELETED IS NULL
       AND SCHEMA_NAME <> 'INFORMATION_SCHEMA'
       AND CATALOG_NAME NOT IN ('SNOWFLAKE', 'SNOWFLAKE_SAMPLE_DATA')
 ),
 TABLES AS (
-    SELECT TABLE_CATALOG, TABLE_SCHEMA, TABLE_NAME, NULL,
+    SELECT TABLE_CATALOG AS OBJECT_DATABASE,
+           TABLE_SCHEMA  AS OBJECT_SCHEMA,
+           TABLE_NAME    AS OBJECT_NAME,
+           NULL::STRING  AS COLUMN_NAME,
            CASE TABLE_TYPE
                 WHEN 'BASE TABLE'        THEN 'TABLE'
                 WHEN 'VIEW'              THEN 'VIEW'
                 WHEN 'MATERIALIZED VIEW' THEN 'MATERIALIZED_VIEW'
                 WHEN 'EXTERNAL TABLE'    THEN 'EXTERNAL_TABLE'
                 ELSE UPPER(REPLACE(TABLE_TYPE, ' ', '_'))
-           END,
-           TABLE_OWNER, CREATED
+           END::STRING   AS OBJECT_TYPE,
+           TABLE_OWNER   AS OBJECT_OWNER,
+           CREATED       AS CREATED_ON
     FROM SNOWFLAKE.ACCOUNT_USAGE.TABLES
     WHERE DELETED IS NULL
       AND TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
       AND TABLE_CATALOG NOT IN ('SNOWFLAKE', 'SNOWFLAKE_SAMPLE_DATA')
 ),
 COLUMNS AS (
-    -- Columns are the largest object class by orders of magnitude, and the one
-    -- where blanket mandatory tagging becomes unworkable. The framework scopes
-    -- column-level obligations to columns in tables that are themselves flagged
-    -- as carrying regulated data; see docs/04-inheritance-strategy.md.
-    SELECT c.TABLE_CATALOG, c.TABLE_SCHEMA, c.TABLE_NAME, c.COLUMN_NAME,
-           'COLUMN', NULL, NULL
-    FROM SNOWFLAKE.ACCOUNT_USAGE.COLUMNS c
-    WHERE c.DELETED IS NULL
-      AND c.TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
-      AND c.TABLE_CATALOG NOT IN ('SNOWFLAKE', 'SNOWFLAKE_SAMPLE_DATA')
+    -- Columns outnumber every other object class by orders of magnitude, which
+    -- is why column-level obligations are scoped rather than universal - see
+    -- VW_COLUMN_IN_SCOPE and docs/03-mandatory-vs-optional.md §3.4.
+    SELECT TABLE_CATALOG    AS OBJECT_DATABASE,
+           TABLE_SCHEMA     AS OBJECT_SCHEMA,
+           TABLE_NAME       AS OBJECT_NAME,
+           COLUMN_NAME      AS COLUMN_NAME,
+           'COLUMN'::STRING AS OBJECT_TYPE,
+           NULL::STRING     AS OBJECT_OWNER,
+           NULL::TIMESTAMP_LTZ AS CREATED_ON
+    FROM SNOWFLAKE.ACCOUNT_USAGE.COLUMNS
+    WHERE DELETED IS NULL
+      AND TABLE_SCHEMA <> 'INFORMATION_SCHEMA'
+      AND TABLE_CATALOG NOT IN ('SNOWFLAKE', 'SNOWFLAKE_SAMPLE_DATA')
 ),
 WAREHOUSES AS (
-    SELECT NULL, NULL, WAREHOUSE_NAME, NULL, 'WAREHOUSE', NULL, CREATED
+    SELECT NULL::STRING       AS OBJECT_DATABASE,
+           NULL::STRING       AS OBJECT_SCHEMA,
+           WAREHOUSE_NAME     AS OBJECT_NAME,
+           NULL::STRING       AS COLUMN_NAME,
+           'WAREHOUSE'::STRING AS OBJECT_TYPE,
+           NULL::STRING       AS OBJECT_OWNER,
+           CREATED            AS CREATED_ON
     FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSES
     WHERE DELETED IS NULL
 ),
 STAGES AS (
-    SELECT STAGE_CATALOG, STAGE_SCHEMA, STAGE_NAME, NULL, 'STAGE',
-           STAGE_OWNER, CREATED
+    SELECT STAGE_CATALOG  AS OBJECT_DATABASE,
+           STAGE_SCHEMA   AS OBJECT_SCHEMA,
+           STAGE_NAME     AS OBJECT_NAME,
+           NULL::STRING   AS COLUMN_NAME,
+           'STAGE'::STRING AS OBJECT_TYPE,
+           STAGE_OWNER    AS OBJECT_OWNER,
+           CREATED        AS CREATED_ON
     FROM SNOWFLAKE.ACCOUNT_USAGE.STAGES
     WHERE DELETED IS NULL
 ),
 PIPES AS (
-    SELECT PIPE_CATALOG, PIPE_SCHEMA, PIPE_NAME, NULL, 'PIPE', PIPE_OWNER, CREATED
+    SELECT PIPE_CATALOG  AS OBJECT_DATABASE,
+           PIPE_SCHEMA   AS OBJECT_SCHEMA,
+           PIPE_NAME     AS OBJECT_NAME,
+           NULL::STRING  AS COLUMN_NAME,
+           'PIPE'::STRING AS OBJECT_TYPE,
+           PIPE_OWNER    AS OBJECT_OWNER,
+           CREATED       AS CREATED_ON
     FROM SNOWFLAKE.ACCOUNT_USAGE.PIPES
     WHERE DELETED IS NULL
 ),
 TASKS AS (
-    SELECT DATABASE_NAME, SCHEMA_NAME, NAME, NULL, 'TASK', OWNER, CREATED
+    SELECT DATABASE_NAME AS OBJECT_DATABASE,
+           SCHEMA_NAME   AS OBJECT_SCHEMA,
+           NAME          AS OBJECT_NAME,
+           NULL::STRING  AS COLUMN_NAME,
+           'TASK'::STRING AS OBJECT_TYPE,
+           OWNER         AS OBJECT_OWNER,
+           CREATED       AS CREATED_ON
     FROM SNOWFLAKE.ACCOUNT_USAGE.TASKS
     WHERE DELETED IS NULL
+),
+-- Object classes with no ACCOUNT_USAGE view of their own - shares, roles,
+-- integrations, notebooks, Streamlit apps. Only the TAGGED ones can be seen
+-- here, which is a real and deliberate limitation: a completely untagged share
+-- is invisible to this inventory, so conditional rules on those object types
+-- (CR-007 in particular) verify the tags of shares that carry at least one tag,
+-- not the existence of shares that carry none.
+--
+-- Closing that gap requires enumerating them with SHOW SHARES / SHOW ROLES into
+-- a control table on a schedule; that job is intentionally out of scope here
+-- rather than implied by an inventory that quietly omits them.
+TAG_ONLY_OBJECTS AS (
+    SELECT DISTINCT
+           a.OBJECT_DATABASE,
+           a.OBJECT_SCHEMA,
+           a.OBJECT_NAME,
+           NULL::STRING AS COLUMN_NAME,
+           a.OBJECT_TYPE,
+           NULL::STRING AS OBJECT_OWNER,
+           NULL::TIMESTAMP_LTZ AS CREATED_ON
+    FROM VW_TAG_ASSIGNMENT a
+    WHERE a.COLUMN_NAME IS NULL
+      AND a.OBJECT_TYPE IN ('SHARE', 'ROLE', 'USER', 'INTEGRATION',
+                            'NOTEBOOK', 'STREAMLIT', 'APPLICATION',
+                            'STREAM', 'FUNCTION', 'PROCEDURE',
+                            'DYNAMIC_TABLE', 'ICEBERG_TABLE')
 )
 SELECT * FROM DATABASES
 UNION ALL SELECT * FROM SCHEMAS
@@ -126,7 +195,8 @@ UNION ALL SELECT * FROM COLUMNS
 UNION ALL SELECT * FROM WAREHOUSES
 UNION ALL SELECT * FROM STAGES
 UNION ALL SELECT * FROM PIPES
-UNION ALL SELECT * FROM TASKS;
+UNION ALL SELECT * FROM TASKS
+UNION ALL SELECT * FROM TAG_ONLY_OBJECTS;
 
 -- -----------------------------------------------------------------------------
 -- VW_EFFECTIVE_TAG - inheritance and override resolution, in one place.
