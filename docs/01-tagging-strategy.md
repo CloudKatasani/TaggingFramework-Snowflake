@@ -27,8 +27,8 @@ nothing breaks when it drifts. This is mechanically enforced: `drives` is a
 required field, and `validate_catalog.py` fails the build if it is empty.
 
 **P2 — Tag the highest object that makes the statement true.**
-`BUSINESS_UNIT` belongs on the database. `DATA_PRODUCT` belongs on the schema.
-`PII` belongs on the column. Tagging lower than necessary multiplies the
+`operating_company` belongs on the database. `data_product` belongs on the schema.
+`data_classification_regulatory` (PII) belongs on the column. Tagging lower than necessary multiplies the
 maintenance surface by thousands with no gain in meaning. Tagging higher than the
 truth makes the tag a lie.
 
@@ -142,16 +142,16 @@ compliance is measured.
 **Tag identifiers**
 
 - `UPPER_SNAKE_CASE`, 2–64 characters, matching `^[A-Z][A-Z0-9_]{1,63}$`.
-- Singular nouns: `REGULATION`, not `REGULATIONS`.
+- Singular nouns: `regulation`, not `REGULATIONS`.
 - No prefixes. `TAG_`, `ENT_`, `CORP_` prefixes add length to every reference and
   distinguish nothing — the namespace `GOVERNANCE.TAGS` already does that.
-- No abbreviations unless they are the enterprise's own term of art: `PII`, `PHI`
-  and `PCI` are universally understood; `BUS_UN` is not.
+- No abbreviations unless they are the enterprise's own term of art: `data_classification_regulatory` (PII), `data_classification_regulatory` (PHI)
+  and `data_classification_regulatory` (PCI) are universally understood; `BUS_UN` is not.
 - No environment, region or team names in the identifier. `PROD_DATA_OWNER`
   guarantees a second tag for every other environment. Environment is a *value*
-  of `ENVIRONMENT`, not part of a name.
+  of `environment`, not part of a name.
 - Boolean-style tags are named for the positive assertion and take `YES`/`NO`:
-  `LEGAL_HOLD`, not `IS_LEGAL_HOLD` or `NO_LEGAL_HOLD`. Double negatives in
+  `legal_hold`, not `IS_LEGAL_HOLD` or `NO_LEGAL_HOLD`. Double negatives in
   policy predicates are a reliable source of production incidents.
 
 **Tag values**
@@ -278,15 +278,15 @@ with different people, and merging them is how ownership becomes nobody's job.
 
 | Role | Tag | Accountable for | Typically |
 |---|---|---|---|
-| **Data owner** | `DATA_OWNER` | The data: access approval, classification, retention | Business executive |
-| **Data steward** | `DATA_STEWARD` | Day-to-day governance execution | Analyst / lead in the domain |
-| **Data product owner** | `DATA_PRODUCT_OWNER` | Roadmap, SLA and consumer contract | Product manager |
-| **Support group** | `SUPPORT_GROUP` | Break/fix, on-call | Engineering team |
+| **Data owner** | `data_owner` | The data: access approval, classification, retention | Business executive |
+| **Data steward** | `data_steward` | Day-to-day governance execution | Analyst / lead in the domain |
+| **Data product owner** | `data_product_owner` | Roadmap, SLA and consumer contract | Product manager |
+| **Support group** | `support_group` | Break/fix, on-call | Engineering team |
 
-`DATA_OWNER` is accountable, `DATA_STEWARD` is responsible: the owner decides that
+`data_owner` is accountable, `data_steward` is responsible: the owner decides that
 a dataset is RESTRICTED, the steward makes the estate reflect that. The tag
 `owner_role` field in the catalog is a fifth, different thing — who owns the
-*definition* of the tag, e.g. the Privacy Office owns what `PII` means, not any
+*definition* of the tag, e.g. the Privacy Office owns what `data_classification_regulatory` (PII) means, not any
 particular assignment of it.
 
 ## 1.9 Stewardship responsibilities
@@ -297,7 +297,7 @@ particular assignment of it.
 | Daily | Work the top of `VW_STEWARD_WORKLIST` | Findings closed |
 | Weekly | Review auto-classification proposals | `CLASSIFICATION_RECONCILIATION` state moves off `UNREVIEWED` |
 | Monthly | Confirm ownership tags still name real people | Attestation record |
-| Quarterly | Re-attest RESTRICTED / HIGHLY_RESTRICTED classifications and open exceptions | Signed attestation |
+| Quarterly | Re-attest RESTRICTED / RESTRICTED classifications and open exceptions | Signed attestation |
 | Quarterly | Domain input to taxonomy review | Council minutes |
 | Annually | Full domain metadata review | Domain governance report |
 
@@ -312,6 +312,6 @@ carry more weight than any policy document:
 2. **Tagging is one procedure call, not a DDL exercise.** `SP_APPLY_TAG` validates,
    applies and audits in one step and returns a plain-language rejection when it
    refuses.
-3. **The centre owns the first 80%.** Automation sets `ENVIRONMENT`,
-   `DATA_LIFECYCLE`, `PII` (proposed) and `DATA_QUALITY_TIER`. Stewards are asked
+3. **The centre owns the first 80%.** Automation sets `environment`,
+   `data_lifecycle`, `data_classification_regulatory` (PII) (proposed) and `data_quality_tier`. Stewards are asked
    for judgement, not data entry (P8).

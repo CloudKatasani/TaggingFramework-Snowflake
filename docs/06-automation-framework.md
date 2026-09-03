@@ -60,7 +60,7 @@ Four properties this loop is designed to have:
 | `TASK_APPLY_ROW_ACCESS` | 15 min | Closes the only real exposure window in the design |
 | `TASK_DETECT_POLICY_DRIFT` | 60 min | Detached masking policy = live incident |
 | `TASK_VALIDATE_COMPLIANCE` | daily 02:00 | Full estate scan |
-| `TASK_RECONCILE_CLASSIFICATION` | after scan | Classifier ↔ enterprise `PII` |
+| `TASK_RECONCILE_CLASSIFICATION` | after scan | Classifier ↔ enterprise `data_classification_regulatory` (PII) |
 | `TASK_SNAPSHOT_COMPLIANCE` | after reconcile | Scorecard trend |
 | `ALERT_POLICY_DRIFT` | 30 min | The one alert that should page someone |
 | `ALERT_CRITICAL_FINDINGS` | daily 06:00 | Digest |
@@ -94,20 +94,20 @@ CREATE OR REPLACE SNOWFLAKE.DATA_PRIVACY.CLASSIFICATION_PROFILE
 
 -- Then per schema:
 CALL GOVERNANCE.CONTROL.ENTERPRISE_CLASSIFICATION_PROFILE!SET_SCHEMA(
-        'CUSTOMER_PROD.CORE');
+        'CUSTOMER_PRD.CORE');
 ```
 
 Snowflake writes `SEMANTIC_CATEGORY` and `PRIVACY_CATEGORY` into `SNOWFLAKE.CORE`.
-`SP_RECONCILE_CLASSIFICATION` then maps that into the enterprise `PII` decision:
+`SP_RECONCILE_CLASSIFICATION` then maps that into the enterprise `data_classification_regulatory` (PII) decision:
 
-| Classifier | Enterprise `PII` | State | Action |
+| Classifier | Enterprise `data_classification_regulatory` (PII) | State | Action |
 |---|---|---|---|
 | IDENTIFIER | (unset) | `AUTO_APPLIED` | `PII = YES` set, steward notified |
 | IDENTIFIER | `YES` | `AGREED` | none |
 | IDENTIFIER | `NO` | `HUMAN_OVERRIDE` | surfaced for review; **never overwritten** |
 | none | `YES` | `HUMAN_OVERRIDE` | none — humans see context the classifier cannot |
 
-The asymmetry is intentional. The classifier may *add* a `PII` flag where nobody
+The asymmetry is intentional. The classifier may *add* a `data_classification_regulatory` (PII) flag where nobody
 has ruled; it may never *remove* one, and it may never revert a human decision.
 Classifiers produce false negatives on encoded identifiers, free-text notes and
 composite keys, and a job that silently downgrades human judgement overnight is a
@@ -171,7 +171,7 @@ gate with two hours of latency approves objects on the basis of yesterday's stat
 
 ```sql
 SELECT OBJECT_NAME, TAG_NAME
-FROM TABLE(INFORMATION_SCHEMA.TAG_REFERENCES('CUSTOMER_PROD.CORE.ORDERS', 'TABLE'))
+FROM TABLE(INFORMATION_SCHEMA.TAG_REFERENCES('CUSTOMER_PRD.CORE.ORDERS', 'TABLE'))
 WHERE TAG_NAME IN ('DATA_CLASSIFICATION', 'PII', 'DATA_LIFECYCLE',
                    'RETENTION_CLASS', 'REGULATION', 'ROW_ACCESS_REQUIRED');
 ```
@@ -184,12 +184,12 @@ anyone touches a table.
 1. **Inventory and prioritise.** `VW_OBJECT_INVENTORY` ranked by storage and query
    volume. Typically 5% of schemas carry 80% of consumption — start there and the
    coverage metric moves visibly in week one, which is what sustains sponsorship.
-2. **Databases first.** `BUSINESS_UNIT`, `ENVIRONMENT`, `COST_CENTER`, `DOMAIN`,
-   `SUPPORT_GROUP`, `DATA_OWNER`, `CRITICALITY`. A few hundred assignments cover
+2. **Databases first.** `operating_company`, `environment`, `cost_center`, `domain`,
+   `support_group`, `data_owner`, `criticality`. A few hundred assignments cover
    the whole estate by inheritance and immediately fix FinOps allocation.
-3. **Run the classifier** across the prioritised schemas to propose `PII`.
-4. **Schemas.** `DATA_PRODUCT`, `DATA_STEWARD`, `SLA_TIER`, `RETENTION_CLASS`,
-   `REGULATION`.
+3. **Run the classifier** across the prioritised schemas to propose `data_classification_regulatory` (PII).
+4. **Schemas.** `data_product`, `data_steward`, `sla_tier`, `retention_class`,
+   `regulation`.
 5. **Attach masking policies.** Only now — with classification in place, so the
    policies protect something on day one rather than being attached to an empty
    taxonomy.

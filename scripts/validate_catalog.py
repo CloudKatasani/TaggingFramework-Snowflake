@@ -36,6 +36,7 @@ def check_structure(cat: dict) -> None:
 def check_tags(cat: dict) -> None:
     limits = cat["platform_limits"]
     valid_objects = set(cat["object_types"]["all"])
+    valid_platforms = {p["id"] for p in cat.get("platforms", [])}
     seen: Counter[str] = Counter()
 
     for tag in cat["tags"]:
@@ -43,7 +44,18 @@ def check_tags(cat: dict) -> None:
         seen[name] += 1
 
         if not C.TAG_NAME_RE.match(name):
-            err(f"{name}: tag name must be UPPER_SNAKE_CASE, 2-64 chars")
+            err(f"{name}: tag key must be lowercase snake_case, 2-64 chars. "
+                f"AWS tag keys are case-sensitive, so the canonical form has to "
+                f"be exact; Snowflake folds it to upper case on its own.")
+        if not tag.get("level"):
+            err(f"{name}: 'level' is mandatory - every tag states which level of "
+                f"the allocation hierarchy it expresses")
+        for plat in tag.get("platforms") or []:
+            if plat not in valid_platforms:
+                err(f"{name}: unknown platform '{plat}'")
+        if not tag.get("platforms"):
+            err(f"{name}: 'platforms' must name at least one platform the tag is "
+                f"applied on")
         if len(name) > 64:
             err(f"{name}: tag identifier exceeds 64 characters")
         if tag.get("tier") not in (1, 2, 3):
@@ -147,6 +159,26 @@ def check_tags(cat: dict) -> None:
         if n > 1:
             err(f"{dupe}: defined {n} times - tag names must be unique")
 
+    # A tag key that folds to the same Snowflake identifier as another is two
+    # keys on AWS and one in Snowflake, which silently merges two allocation
+    # buckets on one platform and not the other.
+    folded: dict[str, list[str]] = {}
+    for tag in cat["tags"]:
+        folded.setdefault(C.snowflake_name(tag), []).append(tag["name"])
+    for sf_name, originals in folded.items():
+        if len(originals) > 1:
+            err(f"{', '.join(originals)} all fold to the Snowflake identifier "
+                f"{sf_name}. They are distinct keys on AWS and one key in "
+                f"Snowflake.")
+
+    # Per-platform key-length ceilings.
+    plat_limits = {p["id"]: p for p in cat.get("platforms", [])}
+    for tag in cat["tags"]:
+        for plat in tag.get("platforms") or []:
+            cap = plat_limits.get(plat, {}).get("max_key_length")
+            if cap and len(tag["name"]) > cap:
+                err(f"{tag['name']}: key exceeds the {plat} limit of {cap} chars")
+
 
 def check_object_budget(cat: dict) -> None:
     """No object type may be pushed past the framework's direct-set budget."""
@@ -214,6 +246,40 @@ def check_conditional_rules(cat: dict) -> None:
                         f"not apply to {ot} - the rule is unenforceable")
 
 
+def check_contradiction_rules(cat: dict) -> None:
+    """A contradiction rule that cannot fire is worse than none: it reports a
+    control as covered when nothing is checking it."""
+    by_name = C.tag_by_name(cat)
+    seen_ids: set[str] = set()
+
+    for rule in cat.get("contradiction_rules", []):
+        rid = rule.get("id", "<no id>")
+        if rid in seen_ids:
+            err(f"contradiction rule id '{rid}' is duplicated")
+        seen_ids.add(rid)
+        if rule.get("severity") not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+            err(f"{rid}: severity must be LOW/MEDIUM/HIGH/CRITICAL")
+
+        for field, values_field in (("if_tag", "if_values"),
+                                    ("then_tag", "forbidden_values")):
+            tag_name = rule.get(field)
+            tag = by_name.get(tag_name)
+            if not tag:
+                err(f"{rid}: {field} references unknown tag '{tag_name}'")
+                continue
+            allowed = tag.get("allowed_values")
+            if not allowed:
+                err(f"{rid}: {field} '{tag_name}' has no controlled vocabulary, so "
+                    f"a forbidden-value rule over it cannot be evaluated")
+                continue
+            for v in rule.get(values_field, []):
+                if v not in allowed:
+                    err(f"{rid}: '{v}' is not an allowed value of {tag_name}")
+
+        if rule.get("if_tag") == rule.get("then_tag"):
+            err(f"{rid}: if_tag and then_tag are the same tag")
+
+
 def check_bindings(cat: dict) -> None:
     by_name = C.tag_by_name(cat)
 
@@ -263,20 +329,31 @@ def check_bindings(cat: dict) -> None:
 
 def check_precedence(cat: dict) -> None:
     by_name = C.tag_by_name(cat)
-    reg = by_name.get("REGULATION")
-    if reg:
-        declared = set(reg.get("allowed_values", [])) - {"MULTI"}
-        prec = set(cat.get("regulation_precedence", []))
+
+    # Each single-valued tag that can legitimately hold several truths at once
+    # needs a total order, or the governing value is undefined and compliance
+    # reporting has a silent gap.
+    for tag_name, prec_key in (
+        ("data_classification_regulatory", "regulatory_category_precedence"),
+        ("regulation", "regulation_precedence"),
+    ):
+        tag = by_name.get(tag_name)
+        if not tag:
+            err(f"{prec_key} refers to missing tag {tag_name}")
+            continue
+        declared = set(tag.get("allowed_values", [])) - {"MULTI"}
+        order = cat.get(prec_key, [])
+        prec = set(order)
         missing = declared - prec
         extra = prec - declared
         if missing:
-            err(f"regulation_precedence is missing {sorted(missing)} - the governing "
-                f"regime would be unresolvable for those values")
+            err(f"{prec_key} is missing {sorted(missing)} - the governing value "
+                f"would be unresolvable for those")
         if extra:
-            err(f"regulation_precedence contains values that REGULATION does not "
-                f"allow: {sorted(extra)}")
-        if len(cat.get("regulation_precedence", [])) != len(prec):
-            err("regulation_precedence contains duplicates")
+            err(f"{prec_key} contains values {tag_name} does not allow: "
+                f"{sorted(extra)}")
+        if len(order) != len(prec):
+            err(f"{prec_key} contains duplicates")
 
     order = cat.get("inheritance_precedence", [])
     valid_objects = set(cat["object_types"]["all"])
@@ -286,13 +363,21 @@ def check_precedence(cat: dict) -> None:
 
 
 def check_tier_sizes(cat: dict) -> None:
-    """The framework's own promise: Tier 1 = 15-20, Tier 2 = 10-15."""
+    """Tier 1 IS the published allocation hierarchy - no more, no less.
+
+    Tier 1 is not a place to park a tag someone would like to be important. It
+    is exactly the set named in the enterprise FinOps Tagging Strategy, so that
+    "mandatory" means the same thing in this repository as it does on the slide
+    every team has been shown.
+    """
     t1 = len(C.tags(cat, 1))
     t2 = len(C.tags(cat, 2))
-    if not 15 <= t1 <= 20:
-        err(f"Tier 1 has {t1} tags; the framework commits to 15-20 core mandatory tags")
-    if not 10 <= t2 <= 15:
-        err(f"Tier 2 has {t2} tags; the framework commits to 10-15 governance tags")
+    if not 8 <= t1 <= 12:
+        err(f"Tier 1 has {t1} tags; it must remain the published allocation "
+            f"hierarchy (8-12). Promoting a tag into Tier 1 is a Data Governance "
+            f"Council decision that also updates the published standard.")
+    if not 10 <= t2 <= 18:
+        err(f"Tier 2 has {t2} tags; the framework commits to 10-18 governance tags")
     total_keys = len(cat["tags"])
     if total_keys > cat["platform_limits"]["max_unique_tag_keys_per_account"]:
         err("catalog exceeds the Snowflake per-account unique tag key limit")
@@ -300,11 +385,32 @@ def check_tier_sizes(cat: dict) -> None:
 
 def check_coverage(cat: dict) -> None:
     """Warn on taxonomy gaps that are legal but usually a mistake."""
+    object_types = cat["object_types"]["all"]
+
     for tag in C.tags(cat):
         if tag["tier"] == 1:
-            if not any(C.requirement(tag, ot) == "MANDATORY"
-                       for ot in cat["object_types"]["all"]):
-                err(f"{tag['name']}: Tier 1 tag is not MANDATORY on any object type")
+            # Tier 1 mirrors the published standard's "Mandatory" column, so the
+            # slide and the catalog cannot say different things about a tag.
+            hier = tag.get("hierarchy_requirement")
+            if hier not in {"MANDATORY", "RECOMMENDED"}:
+                err(f"{tag['name']}: Tier 1 tags must declare hierarchy_requirement "
+                    f"as MANDATORY or RECOMMENDED, matching the published standard")
+                continue
+
+            levels = {C.requirement(tag, ot) for ot in object_types}
+            if hier == "MANDATORY" and "MANDATORY" not in levels:
+                err(f"{tag['name']}: declared MANDATORY in the allocation hierarchy "
+                    f"but not MANDATORY on any object type")
+            if hier == "RECOMMENDED":
+                if "MANDATORY" in levels:
+                    err(f"{tag['name']}: declared RECOMMENDED in the allocation "
+                        f"hierarchy but MANDATORY on an object type - the "
+                        f"repository would be stricter than the published standard")
+                if "RECOMMENDED" not in levels:
+                    err(f"{tag['name']}: declared RECOMMENDED but not RECOMMENDED "
+                        f"on any object type")
+        elif tag.get("hierarchy_requirement"):
+            err(f"{tag['name']}: hierarchy_requirement applies to Tier 1 only")
         if tag["tier"] == 3 and any(
             C.requirement(tag, ot) == "MANDATORY" for ot in cat["object_types"]["all"]
         ):
@@ -321,6 +427,7 @@ def main() -> int:
     check_tags(cat)
     check_object_budget(cat)
     check_conditional_rules(cat)
+    check_contradiction_rules(cat)
     check_bindings(cat)
     check_precedence(cat)
     check_tier_sizes(cat)

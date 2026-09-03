@@ -26,7 +26,9 @@ OVERRIDE_RULES = {"none", "more_restrictive_only", "any"}
 INHERITANCE_MODES = {"inherit", "explicit_only"}
 STATUSES = {"ACTIVE", "DEPRECATED", "RETIRED"}
 
-TAG_NAME_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
+# Canonical tag keys are lowercase snake_case: that is the enterprise standard
+# and it matches AWS, where tag keys are case-SENSITIVE.
+TAG_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{1,63}$")
 
 # Object types that can never carry a tag whose value is a lineage-inherited
 # fact rather than an intrinsic one. Used by the matrix generator only.
@@ -54,6 +56,19 @@ def tags(cat: dict[str, Any], tier: int | None = None) -> list[dict[str, Any]]:
 
 def tag_by_name(cat: dict[str, Any]) -> dict[str, dict[str, Any]]:
     return {t["name"]: t for t in cat["tags"]}
+
+
+def snowflake_name(tag_or_name: Any) -> str:
+    """Snowflake identifier for a tag.
+
+    Snowflake folds unquoted identifiers to upper case, so `operating_company`
+    becomes OPERATING_COMPANY once created, and that is what
+    ACCOUNT_USAGE.TAG_REFERENCES returns. Leaning on the fold is deliberate:
+    quoting lowercase identifiers would force every downstream query, policy
+    body and join to quote them forever.
+    """
+    name = tag_or_name["name"] if isinstance(tag_or_name, dict) else tag_or_name
+    return name.upper()
 
 
 def requirement(tag: dict[str, Any], object_type: str) -> str:

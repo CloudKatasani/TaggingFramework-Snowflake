@@ -7,7 +7,7 @@
 -- Snowflake's APPLY TAG privilege is account-scoped: it cannot be limited to a
 -- database, a schema or a domain. Granting it to every steward in a global
 -- enterprise means every steward can retag every object in the account,
--- including someone else's HIGHLY_RESTRICTED columns.
+-- including someone else's RESTRICTED columns.
 --
 -- So APPLY TAG is granted to exactly one role, TAG_ADMIN, and this owner's-rights
 -- procedure lends that privilege out under conditions:

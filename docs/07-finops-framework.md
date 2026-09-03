@@ -52,15 +52,15 @@ attribute**.
 Where a warehouse serves one team, its own tags allocate it completely:
 
 ```sql
-SELECT BUSINESS_UNIT, COST_CENTER, SUM(COST)
+SELECT OPERATING_COMPANY, DEPARTMENT, WORKLOAD_TYPE, SUM(COST)
 FROM GOVERNANCE.REPORTING.VW_WAREHOUSE_COST_ALLOCATION
 WHERE USAGE_DATE >= DATE_TRUNC('MONTH', CURRENT_DATE())
-GROUP BY 1, 2;
+GROUP BY 1, 2, 3;
 ```
 
 ### Shared warehouses — the real case
 
-Dedicating a warehouse per business unit is the naive fix, and it is expensive:
+Dedicating a warehouse per department is the naive fix, and it is expensive:
 idle time multiplies, the result cache and warm local cache are fragmented, and
 utilisation collapses. Real estates share warehouses, and then warehouse-level
 metering cannot answer the allocation question at all.
@@ -74,6 +74,12 @@ bills the team that *ran* the query, not the team that publishes the table. The
 alternative — billing the data owner — punishes teams for publishing useful data,
 which is exactly the behaviour a data mesh needs to encourage. Publishing costs
 show up as the publisher's *pipeline* compute, which is correct.
+
+`workload_type` makes the split actionable rather than merely accurate. Comparing
+ML_TRAIN spend against ML_TRAIN spend across operating companies surfaces
+right-sizing opportunities that a per-department total never will — a department
+whose bill doubled because it started training models is not the same problem as
+one whose BI queries got slower.
 
 ### Reconciliation
 
@@ -108,7 +114,7 @@ governance programme.
 
 ## 7.5 Showback before chargeback
 
-`COST_ALLOCATION_MODEL` distinguishes them, and the sequencing matters:
+`cost_allocation_model` distinguishes them, and the sequencing matters:
 
 | Value | Meaning |
 |---|---|
@@ -134,6 +140,12 @@ WHERE USAGE_DATE >= DATEADD('day', -30, CURRENT_DATE())
 GROUP BY 1 ORDER BY COST DESC;
 ```
 
+Nearly every row will be a **warehouse**. A warehouse has no parent to inherit
+from, so all six allocation tags must be set on it directly, and any one of them
+missing makes the spend unallocatable. Databases, by contrast, are tagged once
+and cover ten thousand objects by inheritance. If unallocated spend is stubborn,
+look at warehouse tagging before anything else.
+
 Unallocated spend is **never silently spread across cost centres**. Spreading it
 hides the tagging gap and quietly overcharges well-governed teams to subsidise
 poorly-governed ones — precisely inverting the incentive the programme needs.
@@ -153,10 +165,10 @@ honest FinOps metric available:
 
 Tags drive spend *decisions*, not just reporting:
 
-- **Budgets and resource monitors per cost centre.** Group warehouses by
-  `COST_CENTER` tag; alert the owner named in `DATA_OWNER` rather than a central
+- **Budgets and resource monitors per department.** Group warehouses by
+  `operating_company` + `department`; alert the owner named in `data_owner` rather than a central
   inbox nobody reads.
-- **Non-production waste.** `ENVIRONMENT ∈ (DEV, TEST, SANDBOX)` with credits
+- **Non-production waste.** `environment ∈ (DEV, TST, TRAINING)` with credits
   above a threshold, and non-production warehouses with `AUTO_SUSPEND > 300`.
 - **Retirement.** `DATA_LIFECYCLE = DEPRECATED` objects still accruing storage,
   and `ARCHIVED` objects that should have moved to cheaper storage. Deprecated
@@ -164,7 +176,7 @@ Tags drive spend *decisions*, not just reporting:
   estate.
 - **Criticality-tiered DR.** `CRITICALITY = LOW` databases do not need replication;
   the tag makes that a query rather than a discussion.
-- **Chargeback-visible time travel.** `RETENTION_CLASS` next to
+- **Chargeback-visible time travel.** `retention_class` next to
   `TIME_TRAVEL_BYTES` shows a team exactly what their retention choice costs, in
   currency, on their own report.
 
@@ -172,9 +184,10 @@ Tags drive spend *decisions*, not just reporting:
 
 | Audience | View | Cadence |
 |---|---|---|
-| CFO / CIO | `VW_CHARGEBACK_MONTHLY` rolled to `BUSINESS_UNIT` | Monthly |
+| CFO / CIO | `VW_CHARGEBACK_MONTHLY` rolled to `operating_company` | Monthly |
+| Operating company controller | `VW_CHARGEBACK_MONTHLY` by `department` | Monthly |
 | Cost centre owner | `VW_CHARGEBACK_MONTHLY` filtered | Monthly |
-| Domain owner | `VW_QUERY_COST_ATTRIBUTION` by `DOMAIN` | Weekly |
+| Domain owner | `VW_QUERY_COST_ATTRIBUTION` by `domain` | Weekly |
 | Platform / FinOps | `VW_UNALLOCATED_SPEND` | Weekly |
 | Data product owner | Cost per data product against consumption | Monthly |
 

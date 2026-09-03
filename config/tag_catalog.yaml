@@ -1,6 +1,9 @@
 # =============================================================================
-# Enterprise Snowflake Tagging Framework - Canonical Tag Catalog
+# Enterprise Tagging Framework - Canonical Tag Catalog
 # =============================================================================
+# Aligned to: "FinOps Tagging Strategy - Allocation Hierarchy"
+#             (Enterprise Observability & FinOps Architecture)
+#
 # This file is the SINGLE SOURCE OF TRUTH for the enterprise tag taxonomy.
 #
 #   config/tag_catalog.yaml
@@ -13,12 +16,34 @@
 # commit the regenerated artifacts. CI fails if generated output is stale.
 #
 # ---------------------------------------------------------------------------
+# NAMING - READ THIS FIRST
+# ---------------------------------------------------------------------------
+# Canonical tag keys are lowercase snake_case, matching the enterprise standard
+# and AWS tag keys, which ARE case-sensitive.
+#
+# Snowflake folds unquoted identifiers to upper case, so `operating_company`
+# becomes OPERATING_COMPANY once created. That is the correct behaviour to lean
+# on: quoting lowercase identifiers in Snowflake would force every downstream
+# query, policy body and ACCOUNT_USAGE join to quote them forever.
+#
+# So each tag has two names, and the generators pick the right one per platform:
+#   name             lowercase canonical - AWS, Denodo, Collibra, documentation
+#   <name>.upper()   Snowflake identifier and everything read back from
+#                    ACCOUNT_USAGE.TAG_REFERENCES
+#
+# ---------------------------------------------------------------------------
 # FIELD REFERENCE
 # ---------------------------------------------------------------------------
-#   name           Tag identifier (UPPER_SNAKE_CASE, <=64 chars, no prefix).
+#   name           Canonical tag key (lowercase snake_case, <=64 chars).
 #   tier           1 = Core Mandatory | 2 = Governance | 3 = Optional/Domain.
+#   level          The allocation-hierarchy level this tag expresses.
+#   hierarchy_requirement
+#                  Tier 1 only. MANDATORY | RECOMMENDED - mirrors the "Mandatory"
+#                  column of the published FinOps Tagging Strategy, so the slide
+#                  and this catalog cannot drift apart.
 #   category       Taxonomy grouping (business, ownership, classification, ...).
 #   description    Business definition. Becomes the Snowflake tag COMMENT.
+#   platforms      Platforms on which this tag is applied and enforced.
 #   value_source   controlled_vocabulary | reference_data | free_text
 #                    controlled_vocabulary -> ALLOWED_VALUES enforced by Snowflake
 #                    reference_data        -> validated against a control table
@@ -41,16 +66,54 @@
 #   owner_role     Accountable enterprise role for the tag definition.
 #   version        SemVer of the tag DEFINITION (not of its values).
 #   status         ACTIVE | DEPRECATED | RETIRED
-#   deprecates     Tag this one supersedes (drives migration tooling).
 # =============================================================================
 
 metadata:
-  framework_version: "1.0.0"
-  catalog_version: "1.0.0"
+  framework_version: "2.0.0"
+  catalog_version: "2.0.0"
   effective_date: "2026-01-01"
+  aligned_to: "FinOps Tagging Strategy - Allocation Hierarchy"
   review_cadence: "Quarterly (Data Governance Council)"
   owner: "Enterprise Data Governance Office (EDGO)"
   snowflake_edition_required: "Enterprise Edition or higher (object tagging)"
+
+# ---------------------------------------------------------------------------
+# PLATFORMS
+# ---------------------------------------------------------------------------
+# The same tag keys are applied at every resource across the estate. Each
+# platform enforces them differently, and the differences are load-bearing:
+# a tag key that is case-sensitive on AWS and case-folding on Snowflake will
+# silently produce two allocation buckets if that is not handled deliberately.
+# ---------------------------------------------------------------------------
+platforms:
+  - id: AWS
+    identifier_case: preserve          # AWS tag keys are case-SENSITIVE
+    max_key_length: 128
+    max_value_length: 256
+    enforcement: >-
+      Service Control Policies with aws:RequestTag / aws:TagKeys conditions deny
+      resource creation without the mandatory keys; Config rules flag drift.
+  - id: SNOWFLAKE
+    identifier_case: upper             # unquoted identifiers fold to UPPER CASE
+    max_key_length: 255
+    max_value_length: 256
+    enforcement: >-
+      Object tags with ALLOWED_VALUES, SP_APPLY_TAG for reference-data and
+      free-text validation, tag-based masking policies, nightly drift scan.
+  - id: DENODO
+    identifier_case: preserve
+    max_key_length: 128
+    max_value_length: 256
+    enforcement: >-
+      View and datasource custom properties populated from the same registry;
+      validated by the pre-deploy linter, not by the platform itself.
+  - id: COLLIBRA
+    identifier_case: preserve
+    max_key_length: 255
+    max_value_length: 256
+    enforcement: >-
+      Attribute types on assets, synchronised from the tag registry so the
+      catalogue and the platforms cannot disagree about a value's validity.
 
 # ---------------------------------------------------------------------------
 # Deployment topology. Referenced by every generator.
@@ -104,8 +167,7 @@ object_types:
 
 # ---------------------------------------------------------------------------
 # Snowflake platform limits the framework is engineered against.
-# Sourced from Snowflake object-tagging documentation; asserted in CI so a
-# taxonomy change can never silently breach a hard platform ceiling.
+# Asserted in CI so a taxonomy change can never silently breach a hard ceiling.
 # ---------------------------------------------------------------------------
 platform_limits:
   max_tags_per_object: 50
@@ -116,33 +178,93 @@ platform_limits:
   max_tags_directly_set_per_object_target: 12
 
 # ---------------------------------------------------------------------------
-# Reusable value-format patterns (referenced as `value_format: &ref` names).
+# Reusable value-format patterns (referenced by name from `value_format`).
 # ---------------------------------------------------------------------------
 value_formats:
   email: '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
-  principal: '^(?:[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|GRP-[A-Z0-9-]{3,48})$'
+  # An SSO email, or an explicitly-named service account. Nothing else: an
+  # ownership tag whose value is a team nickname routes no incident anywhere.
+  owner_principal: '^(?:[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|service-account-[a-z0-9][a-z0-9-]{1,48})$'
+  group_principal: '^(?:[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|GRP-[A-Z0-9-]{3,48})$'
   code_upper: '^[A-Z0-9][A-Z0-9_]{1,62}$'
+  team_slug: '^team-[a-z0-9][a-z0-9-]{1,48}$'
+  application_slug: '^app-[a-z0-9][a-z0-9-]{1,48}$'
+  opco_code: '^(?:OPCO_[A-Z0-9_]{2,48}|SHARED)$'
   cost_center: '^CC-[0-9]{4,8}$'
   project_code: '^(PRJ|PRG)-[A-Z0-9]{2,4}-[0-9]{3,6}$'
   duration_iso: '^PT(?:[0-9]{1,3}H)?(?:[0-9]{1,3}M)?$|^P[0-9]{1,3}D$'
 
 # =============================================================================
-# TIER 1 - CORE MANDATORY ENTERPRISE TAGS
-# Non-negotiable. Enforced by CI, by the compliance drift task, and by the
-# pre-production promotion gate. 17 tags.
+# TIER 1 - CORE ALLOCATION HIERARCHY
+# -----------------------------------------------------------------------------
+# These are the tags named in the enterprise FinOps Tagging Strategy. They are
+# applied at EVERY resource across AWS, Snowflake, Denodo and Collibra, and
+# untagged production resources are blocked at CI/CD.
+#
+# The hierarchy reads top-down:
+#   operating_company -> department -> domain -> team -> application
+#                     -> workload_type -> owner_user
+# with environment and the two classification tags applied alongside.
 # =============================================================================
 tags:
 
-  - name: BUSINESS_UNIT
+  - name: operating_company
     tier: 1
+    hierarchy_requirement: MANDATORY
+    level: Operating Company
     category: business
     description: >-
-      Top-level legal/reporting entity accountable for the object. Anchors cost
-      allocation, access boundaries and regulatory jurisdiction.
-    value_source: reference_data
-    reference_table: REF_BUSINESS_UNIT
-    value_format: code_upper
-    applies_to: [ACCOUNT, DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, WAREHOUSE, STAGE, PIPE, TASK, STREAM, ROLE, NOTEBOOK, STREAMLIT, APPLICATION]
+      Top-level legal and financial entity for chargeback and consolidation.
+      The consolidation boundary for every cost report and the outermost
+      jurisdiction boundary for data residency.
+    platforms: [AWS, SNOWFLAKE, DENODO, COLLIBRA]
+    value_source: controlled_vocabulary
+    allowed_values:
+      - OPCO_AEP_OHIO
+      - OPCO_AEP_TEXAS
+      - OPCO_APPALACHIAN
+      - OPCO_AEP_INDIANA_MICHIGAN
+      - OPCO_KENTUCKY_POWER
+      - OPCO_PSC_OKLAHOMA
+      - OPCO_SEPC
+      - SHARED
+    value_format: opco_code
+    applies_to: [ACCOUNT, DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, WAREHOUSE, STAGE, PIPE, TASK, STREAM, ROLE, USER, SHARE, NOTEBOOK, STREAMLIT, APPLICATION]
+    default_requirement: INHERITED
+    requirement:
+      DATABASE: MANDATORY
+      WAREHOUSE: MANDATORY
+      ROLE: RECOMMENDED
+      COLUMN: NOT_APPLICABLE
+    inheritance: inherit
+    override_rule: any
+    drives: [finops_chargeback, finops_consolidation, access_boundary, residency_control, discovery]
+    owner_role: FINANCE_FINOPS
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: department
+    tier: 1
+    hierarchy_requirement: MANDATORY
+    level: Department
+    category: business
+    description: >-
+      Business unit or cost centre within the operating company. The level at
+      which departmental cost reports are produced and budgets are owned.
+    platforms: [AWS, SNOWFLAKE, DENODO, COLLIBRA]
+    value_source: controlled_vocabulary
+    allowed_values:
+      - FINANCE
+      - HR
+      - MARKETING
+      - DISTRIBUTION
+      - GENERATION
+      - COMOPS
+      - GIS
+      - CORPORATE
+      - CUSTOMER
+      - SHARED_SERVICES
+    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, WAREHOUSE, STAGE, PIPE, TASK, STREAM, ROLE, NOTEBOOK, STREAMLIT, APPLICATION]
     default_requirement: INHERITED
     requirement:
       DATABASE: MANDATORY
@@ -150,21 +272,32 @@ tags:
       COLUMN: NOT_APPLICABLE
     inheritance: inherit
     override_rule: any
-    drives: [finops_chargeback, access_boundary, discovery, compliance_reporting]
-    owner_role: EDGO
+    drives: [finops_chargeback, department_reporting, budget_enforcement, discovery]
+    owner_role: FINANCE_FINOPS
     version: "1.0.0"
     status: ACTIVE
 
-  - name: DOMAIN
+  - name: domain
     tier: 1
+    hierarchy_requirement: MANDATORY
+    level: Data Domain
     category: business
     description: >-
-      Data Mesh domain that owns the object (e.g. CUSTOMER, FINANCE, SUPPLY_CHAIN).
-      The unit of federated governance and of data-product publication.
-    value_source: reference_data
-    reference_table: REF_DOMAIN
-    value_format: code_upper
-    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, STAGE, PIPE, TASK, STREAM, WAREHOUSE, NOTEBOOK, STREAMLIT, APPLICATION]
+      Logical data domain owning the workload, mesh-style. The unit of federated
+      governance and of data-product publication. Independent of department:
+      one domain routinely serves several departments.
+    platforms: [AWS, SNOWFLAKE, DENODO, COLLIBRA]
+    value_source: controlled_vocabulary
+    allowed_values:
+      - CUSTOMER
+      - LOCATION
+      - METER
+      - FINANCE
+      - SUPPLY_CHAIN
+      - MARKETING
+      - RISK
+      - TELEMETRY
+    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, STAGE, PIPE, TASK, STREAM, WAREHOUSE, SHARE, NOTEBOOK, STREAMLIT, APPLICATION]
     default_requirement: INHERITED
     requirement:
       DATABASE: MANDATORY
@@ -172,107 +305,175 @@ tags:
       COLUMN: NOT_APPLICABLE
     inheritance: inherit
     override_rule: any
-    drives: [data_mesh, discovery, federated_governance, finops_showback]
+    drives: [data_mesh, federated_governance, discovery, finops_showback, row_access_policy]
     owner_role: EDGO
     version: "1.0.0"
     status: ACTIVE
 
-  - name: DATA_PRODUCT
+  - name: team
     tier: 1
-    category: business
-    description: >-
-      Named, versioned, independently consumable data product. In this framework
-      a data product maps 1:1 to a schema (the publication boundary).
-    value_source: reference_data
-    reference_table: REF_DATA_PRODUCT
-    value_format: '^[A-Z0-9][A-Z0-9_]{2,62}$'
-    applies_to: [SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, STAGE, PIPE, TASK, STREAM, SHARE, NOTEBOOK, STREAMLIT]
-    default_requirement: INHERITED
-    requirement:
-      SCHEMA: MANDATORY
-      SHARE: MANDATORY
-      COLUMN: NOT_APPLICABLE
-      DATABASE: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: none
-    drives: [data_mesh, discovery, lineage, sla_management, finops_showback]
-    owner_role: DOMAIN_COUNCIL
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: DATA_OWNER
-    tier: 1
+    hierarchy_requirement: MANDATORY
+    level: Team
     category: ownership
     description: >-
-      Accountable business owner (RACI 'A') for the data. Named individual or
-      enterprise group. Approves access, classification and retention decisions.
-    value_source: free_text
-    value_format: principal
-    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, STAGE, SHARE, APPLICATION]
+      Engineering team accountable for build and run. Validated against the team
+      registry so a disbanded team cannot keep owning production workloads.
+    platforms: [AWS, SNOWFLAKE, DENODO, COLLIBRA]
+    value_source: reference_data
+    reference_table: REF_TEAM
+    value_format: team_slug
+    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, STAGE, PIPE, TASK, STREAM, WAREHOUSE, FUNCTION, PROCEDURE, NOTEBOOK, STREAMLIT, APPLICATION]
     default_requirement: INHERITED
     requirement:
       DATABASE: MANDATORY
       SCHEMA: MANDATORY
-      COLUMN: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: any
-    drives: [access_approval, incident_routing, attestation, discovery]
-    owner_role: EDGO
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: DATA_STEWARD
-    tier: 1
-    category: ownership
-    description: >-
-      Responsible steward (RACI 'R') executing day-to-day governance: tagging,
-      classification review, quality remediation, metadata curation.
-    value_source: free_text
-    value_format: principal
-    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, STAGE]
-    default_requirement: INHERITED
-    requirement:
-      SCHEMA: MANDATORY
-      COLUMN: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: any
-    drives: [stewardship_workflow, attestation, remediation_routing]
-    owner_role: EDGO
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: SUPPORT_GROUP
-    tier: 1
-    category: ownership
-    description: >-
-      Operational on-call group that owns break/fix for the object. Must resolve
-      to a real queue in the enterprise ITSM tool.
-    value_source: reference_data
-    reference_table: REF_SUPPORT_GROUP
-    value_format: '^GRP-[A-Z0-9-]{3,48}$'
-    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, DYNAMIC_TABLE, STAGE, PIPE, TASK, STREAM, WAREHOUSE, APPLICATION]
-    default_requirement: INHERITED
-    requirement:
-      DATABASE: MANDATORY
+      WAREHOUSE: MANDATORY
       TASK: MANDATORY
       PIPE: MANDATORY
       COLUMN: NOT_APPLICABLE
     inheritance: inherit
     override_rule: any
-    drives: [incident_routing, sla_management, operational_reporting]
+    drives: [incident_routing, stewardship_workflow, finops_showback, operational_reporting]
     owner_role: PLATFORM_ENGINEERING
     version: "1.0.0"
     status: ACTIVE
 
-  - name: DATA_CLASSIFICATION
+  - name: application
     tier: 1
+    hierarchy_requirement: MANDATORY
+    level: Application
+    category: business
+    description: >-
+      Discrete application or data product, aligned to the CMDB. The join key
+      between Snowflake objects and the enterprise application portfolio, which
+      is what makes cross-platform impact analysis possible at all.
+    platforms: [AWS, SNOWFLAKE, DENODO, COLLIBRA]
+    value_source: reference_data
+    reference_table: REF_APPLICATION
+    value_format: application_slug
+    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, STAGE, PIPE, TASK, STREAM, WAREHOUSE, INTEGRATION, SHARE, NOTEBOOK, STREAMLIT, APPLICATION]
+    default_requirement: INHERITED
+    requirement:
+      SCHEMA: MANDATORY
+      WAREHOUSE: MANDATORY
+      PIPE: MANDATORY
+      TASK: MANDATORY
+      COLUMN: NOT_APPLICABLE
+    inheritance: inherit
+    override_rule: any
+    drives: [cmdb_reconciliation, impact_analysis, finops_chargeback, discovery, incident_routing]
+    owner_role: ENTERPRISE_ARCHITECTURE
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: workload_type
+    tier: 1
+    hierarchy_requirement: MANDATORY
+    level: Role / Workload Class
+    category: operational
+    description: >-
+      Workload class, for resource-pattern rollups. Lets FinOps compare like with
+      like across the estate - ML training spend against ML training spend, not
+      against BI - and drives right-sizing recommendations per pattern.
+    platforms: [AWS, SNOWFLAKE, DENODO]
+    value_source: controlled_vocabulary
+    allowed_values:
+      - INGEST
+      - TRANSFORM
+      - ANALYTICS
+      - ML_TRAIN
+      - ML_SERVE
+      - BI
+      - GOVERNANCE
+      - PLATFORM_OPS
+    applies_to: [SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, STAGE, PIPE, TASK, STREAM, WAREHOUSE, FUNCTION, PROCEDURE, NOTEBOOK, STREAMLIT]
+    default_requirement: INHERITED
+    requirement:
+      WAREHOUSE: MANDATORY
+      TASK: MANDATORY
+      PIPE: MANDATORY
+      SCHEMA: RECOMMENDED
+      COLUMN: NOT_APPLICABLE
+    inheritance: inherit
+    override_rule: any
+    drives: [finops_rightsizing, workload_analytics, capacity_planning, finops_showback]
+    owner_role: PLATFORM_ENGINEERING
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: owner_user
+    tier: 1
+    hierarchy_requirement: RECOMMENDED
+    level: Owner / User
+    category: ownership
+    description: >-
+      Accountable individual by SSO email, or the named service account that owns
+      an automated workload. Recommended rather than mandatory: an owner tag that
+      is mandated before joiner-mover-leaver feeds are wired up fills with stale
+      names, which is worse than an honest blank.
+    platforms: [AWS, SNOWFLAKE, DENODO, COLLIBRA]
+    value_source: free_text
+    value_format: owner_principal
+    applies_to: [ACCOUNT, DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, STAGE, PIPE, TASK, STREAM, WAREHOUSE, ROLE, USER, INTEGRATION, SHARE, NOTEBOOK, STREAMLIT, APPLICATION]
+    default_requirement: OPTIONAL
+    requirement:
+      DATABASE: RECOMMENDED
+      SCHEMA: RECOMMENDED
+      WAREHOUSE: RECOMMENDED
+      COLUMN: NOT_APPLICABLE
+    inheritance: inherit
+    override_rule: any
+    drives: [incident_routing, access_approval, attestation, finops_accountability]
+    owner_role: EDGO
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: environment
+    tier: 1
+    hierarchy_requirement: MANDATORY
+    level: Environment
+    category: lifecycle
+    description: >-
+      Lifecycle stage, required alongside the core tags. Never inherited across a
+      clone into a different environment - the clone-remediation job rewrites it.
+    platforms: [AWS, SNOWFLAKE, DENODO, COLLIBRA]
+    value_source: controlled_vocabulary
+    allowed_values:
+      - PRD
+      - UAT
+      - TST
+      - DEV
+      - TRAINING
+      - BACKUP
+    applies_to: [ACCOUNT, DATABASE, SCHEMA, WAREHOUSE, STAGE, PIPE, TASK, STREAM, ROLE, INTEGRATION, NOTEBOOK, STREAMLIT, APPLICATION]
+    default_requirement: INHERITED
+    requirement:
+      DATABASE: MANDATORY
+      WAREHOUSE: MANDATORY
+      COLUMN: NOT_APPLICABLE
+    inheritance: inherit
+    override_rule: none
+    drives: [policy_selection, promotion_gate, finops_chargeback, masking_strictness, nonprod_waste_analysis]
+    owner_role: PLATFORM_ENGINEERING
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: data_classification_enterprise
+    tier: 1
+    hierarchy_requirement: MANDATORY
+    level: Data Classification
     category: classification
     description: >-
-      Enterprise confidentiality level. The primary driver of masking, sharing
-      eligibility and export controls. Most restrictive value in the lineage wins.
+      Core enterprise confidentiality classification. The only tag carrying
+      masking policy attachments, so it is the anchor of the whole protection
+      model. Most restrictive value in the lineage wins.
+    platforms: [AWS, SNOWFLAKE, DENODO, COLLIBRA]
     value_source: controlled_vocabulary
-    allowed_values: [PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED, HIGHLY_RESTRICTED]
-    ordinal_values: [PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED, HIGHLY_RESTRICTED]
+    allowed_values: [NONE, PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED]
+    # NONE ranks LOWEST, and it means "assessed, no classification applies".
+    # An ABSENT tag is a different thing entirely and fails closed to RESTRICTED
+    # in the masking policies - see docs/05.
+    ordinal_values: [NONE, PUBLIC, INTERNAL, CONFIDENTIAL, RESTRICTED]
     applies_to: [ACCOUNT, DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, EXTERNAL_TABLE, ICEBERG_TABLE, COLUMN, STAGE, SHARE, NOTEBOOK, STREAMLIT]
     default_requirement: INHERITED
     requirement:
@@ -290,88 +491,184 @@ tags:
     version: "1.0.0"
     status: ACTIVE
 
-  - name: PII
+  - name: data_classification_regulatory
     tier: 1
+    hierarchy_requirement: MANDATORY
+    level: Data Classification
     category: privacy
     description: >-
-      Object contains Personally Identifiable Information as defined by the
-      enterprise privacy standard. Set automatically at column level by the
-      Snowflake classification reconciliation job; human-overridable with reason.
+      Regulatory-driven data classification. Holds the GOVERNING category - the
+      one whose technical controls are most prescriptive - resolved by documented
+      precedence. Where several categories apply, the full set is recorded in
+      CONTROL.REGULATORY_SCOPE, because a Snowflake tag holds only one value.
+    platforms: [AWS, SNOWFLAKE, DENODO, COLLIBRA]
     value_source: controlled_vocabulary
-    allowed_values: ["YES", "NO"]
-    ordinal_values: ["NO", "YES"]
+    allowed_values: [NONE, PII, SPII, PHI, PCI]
+    # Ordered by how prescriptive the mandated technical control is, not by
+    # penalty size: PCI-DSS dictates specific handling of specific fields, PII
+    # under a privacy regime mandates outcomes and leaves the mechanism open.
+    ordinal_values: [NONE, PII, SPII, PHI, PCI]
     applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, EXTERNAL_TABLE, ICEBERG_TABLE, COLUMN, STAGE, SHARE]
-    default_requirement: INHERITED
-    requirement:
-      TABLE: MANDATORY
-      VIEW: MANDATORY
-      COLUMN: MANDATORY
-      SCHEMA: RECOMMENDED
-      SHARE: MANDATORY
-    inheritance: inherit
-    override_rule: more_restrictive_only
-    drives: [dynamic_masking, privacy_reporting, dsar_fulfilment, gdpr_ccpa_evidence, auto_classification]
-    owner_role: PRIVACY_OFFICE
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: ENVIRONMENT
-    tier: 1
-    category: lifecycle
-    description: >-
-      Deployment environment of the object. Never inherited across a clone into a
-      different environment - the clone-remediation task rewrites it.
-    value_source: controlled_vocabulary
-    allowed_values: [DEV, TEST, UAT, PROD, SANDBOX, DR]
-    applies_to: [ACCOUNT, DATABASE, SCHEMA, WAREHOUSE, STAGE, PIPE, TASK, STREAM, ROLE, INTEGRATION, NOTEBOOK, STREAMLIT, APPLICATION]
-    default_requirement: INHERITED
-    requirement:
-      DATABASE: MANDATORY
-      WAREHOUSE: MANDATORY
-      COLUMN: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: none
-    drives: [policy_selection, finops_chargeback, promotion_gate, masking_strictness]
-    owner_role: PLATFORM_ENGINEERING
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: DATA_LIFECYCLE
-    tier: 1
-    category: lifecycle
-    description: >-
-      Lifecycle state of the object itself. Drives deprecation comms, consumer
-      warnings and the automated archive/purge pipeline.
-    value_source: controlled_vocabulary
-    allowed_values: [ACTIVE, DEPRECATED, ARCHIVED, PENDING_PURGE]
-    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, STAGE, PIPE, TASK, STREAM, SHARE]
     default_requirement: INHERITED
     requirement:
       SCHEMA: MANDATORY
       TABLE: MANDATORY
       VIEW: MANDATORY
+      COLUMN: MANDATORY
+      STAGE: MANDATORY
+      SHARE: MANDATORY
+    inheritance: inherit
+    override_rule: more_restrictive_only
+    drives: [dynamic_masking, privacy_reporting, dsar_fulfilment, audit_evidence, auto_classification, pci_scoping]
+    owner_role: PRIVACY_OFFICE
+    version: "1.0.0"
+    status: ACTIVE
+
+# =============================================================================
+# TIER 2 - GOVERNANCE TAGS
+# -----------------------------------------------------------------------------
+# Not part of the published allocation hierarchy, but each one is consumed by an
+# automated control that the hierarchy alone cannot drive: retention and purge,
+# incident routing, row-level access, DR tiering, evidence for an assessor.
+# Mandatory only where a condition holds (see conditional_rules).
+# =============================================================================
+
+  - name: data_product
+    tier: 2
+    level: Data Product
+    category: business
+    description: >-
+      Named, versioned, independently consumable data product. Maps 1:1 to a
+      schema, which is the publication boundary. Distinct from `application`:
+      one application can publish several data products.
+    platforms: [SNOWFLAKE, DENODO, COLLIBRA]
+    value_source: reference_data
+    reference_table: REF_DATA_PRODUCT
+    value_format: '^dp-[a-z0-9][a-z0-9-]{2,48}$'
+    applies_to: [SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, STAGE, PIPE, TASK, STREAM, SHARE, NOTEBOOK, STREAMLIT]
+    default_requirement: INHERITED
+    requirement:
+      SCHEMA: RECOMMENDED
+      SHARE: MANDATORY
+      COLUMN: NOT_APPLICABLE
+      DATABASE: NOT_APPLICABLE
+    inheritance: inherit
+    override_rule: none
+    drives: [data_mesh, discovery, lineage, sla_management, consumer_contract]
+    owner_role: DOMAIN_COUNCIL
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: data_owner
+    tier: 2
+    level: Ownership
+    category: ownership
+    description: >-
+      Accountable business owner (RACI 'A') for the DATA, as distinct from
+      owner_user who is accountable for the RESOURCE. Approves access,
+      classification and retention decisions.
+    platforms: [SNOWFLAKE, DENODO, COLLIBRA]
+    value_source: free_text
+    value_format: group_principal
+    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, STAGE, SHARE, APPLICATION]
+    default_requirement: INHERITED
+    requirement:
+      SCHEMA: RECOMMENDED
+      SHARE: MANDATORY
       COLUMN: NOT_APPLICABLE
     inheritance: inherit
     override_rule: any
-    drives: [retirement_automation, consumer_notification, cost_avoidance, discovery]
+    drives: [access_approval, attestation, remediation_routing, audit_evidence]
     owner_role: EDGO
     version: "1.0.0"
     status: ACTIVE
 
-  - name: CRITICALITY
-    tier: 1
+  - name: data_steward
+    tier: 2
+    level: Ownership
+    category: ownership
+    description: >-
+      Responsible steward (RACI 'R') executing day-to-day governance: tagging,
+      classification review, quality remediation, metadata curation.
+    platforms: [SNOWFLAKE, COLLIBRA]
+    value_source: free_text
+    value_format: group_principal
+    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, STAGE]
+    default_requirement: INHERITED
+    requirement:
+      SCHEMA: RECOMMENDED
+      COLUMN: NOT_APPLICABLE
+    inheritance: inherit
+    override_rule: any
+    drives: [stewardship_workflow, attestation, remediation_routing]
+    owner_role: EDGO
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: support_group
+    tier: 2
+    level: Ownership
+    category: ownership
+    description: >-
+      ITSM queue that owns break/fix. Complements `team`, which names the
+      accountable engineers; support_group names where the ticket actually lands
+      out of hours.
+    platforms: [AWS, SNOWFLAKE, DENODO]
+    value_source: reference_data
+    reference_table: REF_SUPPORT_GROUP
+    value_format: '^GRP-[A-Z0-9-]{3,48}$'
+    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, DYNAMIC_TABLE, STAGE, PIPE, TASK, STREAM, WAREHOUSE, INTEGRATION, APPLICATION]
+    default_requirement: INHERITED
+    requirement:
+      COLUMN: NOT_APPLICABLE
+    inheritance: inherit
+    override_rule: any
+    drives: [incident_routing, sla_management, operational_reporting]
+    owner_role: PLATFORM_ENGINEERING
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: cost_center
+    tier: 2
+    level: Financial
+    category: financial
+    description: >-
+      GL cost centre code. `department` is the human-facing allocation level;
+      cost_center is the posting key a journal entry actually needs. Required
+      wherever cost_allocation_model is CHARGEBACK.
+    platforms: [AWS, SNOWFLAKE]
+    value_source: reference_data
+    reference_table: REF_COST_CENTER
+    value_format: cost_center
+    applies_to: [ACCOUNT, DATABASE, SCHEMA, WAREHOUSE, TASK, PIPE, ROLE, USER, NOTEBOOK, STREAMLIT, APPLICATION]
+    default_requirement: INHERITED
+    requirement:
+      WAREHOUSE: RECOMMENDED
+      DATABASE: RECOMMENDED
+      COLUMN: NOT_APPLICABLE
+    inheritance: inherit
+    override_rule: any
+    drives: [finops_chargeback, budget_enforcement, gl_posting]
+    owner_role: FINANCE_FINOPS
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: criticality
+    tier: 2
+    level: Lifecycle
     category: lifecycle
     description: >-
       Business impact if the object is unavailable or incorrect. Drives DR scope,
       monitoring depth, change-control rigour and incident severity.
+    platforms: [AWS, SNOWFLAKE, DENODO]
     value_source: controlled_vocabulary
     allowed_values: [LOW, MEDIUM, HIGH, CRITICAL]
     ordinal_values: [LOW, MEDIUM, HIGH, CRITICAL]
     applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, PIPE, TASK, STREAM, WAREHOUSE, APPLICATION]
     default_requirement: INHERITED
     requirement:
-      DATABASE: MANDATORY
-      SCHEMA: MANDATORY
+      DATABASE: RECOMMENDED
+      SCHEMA: RECOMMENDED
       COLUMN: NOT_APPLICABLE
     inheritance: inherit
     override_rule: more_restrictive_only
@@ -380,42 +677,46 @@ tags:
     version: "1.0.0"
     status: ACTIVE
 
-  - name: COST_CENTER
-    tier: 1
-    category: financial
+  - name: data_lifecycle
+    tier: 2
+    level: Lifecycle
+    category: lifecycle
     description: >-
-      GL cost centre charged for the compute and storage attributed to the object.
-      Must exist and be open in the ERP chart of accounts.
-    value_source: reference_data
-    reference_table: REF_COST_CENTER
-    value_format: cost_center
-    applies_to: [ACCOUNT, DATABASE, SCHEMA, WAREHOUSE, TASK, PIPE, NOTEBOOK, STREAMLIT, APPLICATION, ROLE, USER]
+      Lifecycle state of the object itself. Drives deprecation comms, consumer
+      warnings and the automated archive/purge pipeline. Deprecated data nobody
+      deleted is consistently one of the largest recoverable cost lines.
+    platforms: [SNOWFLAKE, DENODO, COLLIBRA]
+    value_source: controlled_vocabulary
+    allowed_values: [ACTIVE, DEPRECATED, ARCHIVED, PENDING_PURGE]
+    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, STAGE, PIPE, TASK, STREAM, SHARE]
     default_requirement: INHERITED
     requirement:
-      DATABASE: MANDATORY
-      WAREHOUSE: MANDATORY
+      SCHEMA: RECOMMENDED
+      TABLE: RECOMMENDED
       COLUMN: NOT_APPLICABLE
     inheritance: inherit
     override_rule: any
-    drives: [finops_chargeback, budget_enforcement, department_reporting]
-    owner_role: FINANCE_FINOPS
+    drives: [retirement_automation, consumer_notification, cost_avoidance, discovery]
+    owner_role: EDGO
     version: "1.0.0"
     status: ACTIVE
 
-  - name: RETENTION_CLASS
-    tier: 1
+  - name: retention_class
+    tier: 2
+    level: Compliance
     category: compliance
     description: >-
       Records-management retention class from the enterprise retention schedule.
-      Drives the automated archive/purge pipeline. LEGAL_HOLD always supersedes.
+      Drives the automated archive and purge pipeline. legal_hold always
+      supersedes it.
+    platforms: [AWS, SNOWFLAKE, COLLIBRA]
     value_source: controlled_vocabulary
     allowed_values: [TRANSIENT_30D, SHORT_1Y, STANDARD_3Y, EXTENDED_7Y, REGULATORY_10Y, PERMANENT, INDEFINITE_REVIEW]
     applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, EXTERNAL_TABLE, STAGE]
     default_requirement: INHERITED
     requirement:
-      SCHEMA: MANDATORY
-      TABLE: MANDATORY
-      STAGE: MANDATORY
+      SCHEMA: RECOMMENDED
+      STAGE: RECOMMENDED
       COLUMN: NOT_APPLICABLE
     inheritance: inherit
     override_rule: any
@@ -424,292 +725,14 @@ tags:
     version: "1.0.0"
     status: ACTIVE
 
-  - name: REGULATION
-    tier: 1
+  - name: legal_hold
+    tier: 2
+    level: Compliance
     category: compliance
     description: >-
-      The GOVERNING regulatory regime - the single regime whose controls are the
-      most stringent for this object, resolved by documented precedence. The full
-      multi-regime scope lives in CONTROL.REGULATORY_SCOPE (Snowflake tags are
-      single-valued); see docs/02-tag-taxonomy.md#multi-valued-attributes.
-    value_source: controlled_vocabulary
-    allowed_values: [NONE, SOX, GDPR, CCPA, HIPAA, PCI_DSS, GLBA, FERPA, LGPD, PIPEDA, PDPA, MULTI]
-    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, EXTERNAL_TABLE, COLUMN, STAGE, SHARE]
-    default_requirement: INHERITED
-    requirement:
-      SCHEMA: MANDATORY
-      TABLE: MANDATORY
-      SHARE: MANDATORY
-      COLUMN: OPTIONAL
-    inheritance: inherit
-    override_rule: any
-    drives: [compliance_reporting, residency_control, audit_evidence, policy_selection]
-    owner_role: COMPLIANCE_OFFICE
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: MASKING_REQUIRED
-    tier: 1
-    category: security
-    description: >-
-      Declares that the column must carry a masking policy. This is the DECLARED
-      INTENT; SNOWFLAKE.CORE tag-based masking attachment is the ENFORCEMENT.
-      The drift detector reconciles the two and raises on divergence.
-    value_source: controlled_vocabulary
-    allowed_values: ["YES", "NO"]
-    ordinal_values: ["NO", "YES"]
-    applies_to: [TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, EXTERNAL_TABLE, ICEBERG_TABLE, COLUMN]
-    default_requirement: OPTIONAL
-    requirement:
-      COLUMN: MANDATORY
-      TABLE: RECOMMENDED
-      VIEW: RECOMMENDED
-    inheritance: inherit
-    override_rule: more_restrictive_only
-    drives: [dynamic_masking, control_attestation, drift_detection]
-    owner_role: CISO_DATA_SECURITY
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: ROW_ACCESS_REQUIRED
-    tier: 1
-    category: security
-    description: >-
-      Declares that the table/view must carry a row access policy. Snowflake does
-      NOT support attaching row access policies to tags, so enforcement is via the
-      SP_APPLY_ROW_ACCESS_POLICIES reconciliation task, not tag attachment.
-    value_source: controlled_vocabulary
-    allowed_values: ["YES", "NO"]
-    ordinal_values: ["NO", "YES"]
-    applies_to: [TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, EXTERNAL_TABLE, ICEBERG_TABLE]
-    default_requirement: OPTIONAL
-    requirement:
-      TABLE: MANDATORY
-      VIEW: MANDATORY
-      COLUMN: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: more_restrictive_only
-    drives: [row_access_policy, control_attestation, drift_detection]
-    owner_role: CISO_DATA_SECURITY
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: SLA_TIER
-    tier: 1
-    category: operational
-    description: >-
-      Freshness/availability commitment published to consumers of the data product.
-      Drives monitoring thresholds, alert routing and DR tiering.
-    value_source: controlled_vocabulary
-    allowed_values: [PLATINUM_15M, GOLD_1H, SILVER_4H, BRONZE_24H, BEST_EFFORT]
-    ordinal_values: [BEST_EFFORT, BRONZE_24H, SILVER_4H, GOLD_1H, PLATINUM_15M]
-    applies_to: [SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, PIPE, TASK, STREAM, SHARE]
-    default_requirement: INHERITED
-    requirement:
-      SCHEMA: MANDATORY
-      TASK: MANDATORY
-      PIPE: MANDATORY
-      COLUMN: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: any
-    drives: [sla_management, monitoring_depth, alert_routing, dr_scope]
-    owner_role: PLATFORM_ENGINEERING
-    version: "1.0.0"
-    status: ACTIVE
-
-# =============================================================================
-# TIER 2 - GOVERNANCE TAGS
-# Mandatory only where a specific condition holds (conditional mandates, see
-# `conditional_rules` below). Otherwise recommended. 14 tags.
-# =============================================================================
-
-  - name: SUB_DOMAIN
-    tier: 2
-    category: business
-    description: Second-level decomposition of DOMAIN, for large domains only.
-    value_source: reference_data
-    reference_table: REF_SUB_DOMAIN
-    value_format: code_upper
-    applies_to: [SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, TASK, PIPE, STREAM]
-    default_requirement: OPTIONAL
-    requirement:
-      SCHEMA: RECOMMENDED
-      COLUMN: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: any
-    drives: [discovery, federated_governance, finops_showback]
-    owner_role: DOMAIN_COUNCIL
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: APPLICATION
-    tier: 2
-    category: business
-    description: >-
-      CMDB application identifier of the producing or consuming system. Enables
-      impact analysis between Snowflake objects and the application portfolio.
-    value_source: reference_data
-    reference_table: REF_APPLICATION
-    value_format: '^APP-[0-9]{4,8}$'
-    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, DYNAMIC_TABLE, STAGE, PIPE, TASK, STREAM, INTEGRATION, NOTEBOOK, STREAMLIT, APPLICATION]
-    default_requirement: OPTIONAL
-    requirement:
-      SCHEMA: RECOMMENDED
-      PIPE: RECOMMENDED
-      INTEGRATION: RECOMMENDED
-      COLUMN: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: any
-    drives: [impact_analysis, cmdb_reconciliation, incident_routing]
-    owner_role: ENTERPRISE_ARCHITECTURE
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: APPLICATION_OWNER
-    tier: 2
-    category: ownership
-    description: Accountable owner of the APPLICATION referenced by the object.
-    value_source: free_text
-    value_format: principal
-    applies_to: [DATABASE, SCHEMA, STAGE, PIPE, TASK, INTEGRATION, APPLICATION]
-    default_requirement: OPTIONAL
-    requirement:
-      APPLICATION: RECOMMENDED
-      COLUMN: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: any
-    drives: [impact_analysis, incident_routing, attestation]
-    owner_role: ENTERPRISE_ARCHITECTURE
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: PLATFORM_OWNER
-    tier: 2
-    category: ownership
-    description: >-
-      Platform engineering team accountable for the Snowflake infrastructure
-      object (warehouse, integration, share, account-level construct).
-    value_source: reference_data
-    reference_table: REF_SUPPORT_GROUP
-    value_format: '^GRP-[A-Z0-9-]{3,48}$'
-    applies_to: [ACCOUNT, WAREHOUSE, INTEGRATION, SHARE, ROLE, DATABASE]
-    default_requirement: OPTIONAL
-    requirement:
-      WAREHOUSE: MANDATORY
-      INTEGRATION: MANDATORY
-      COLUMN: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: any
-    drives: [incident_routing, platform_attestation, finops_chargeback]
-    owner_role: PLATFORM_ENGINEERING
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: DOMAIN_OWNER
-    tier: 2
-    category: data_mesh
-    description: >-
-      Accountable owner of the mesh DOMAIN. Normally set once on the domain's
-      database and inherited; a per-object override is an exception.
-    value_source: free_text
-    value_format: principal
-    applies_to: [DATABASE, SCHEMA]
-    default_requirement: OPTIONAL
-    requirement:
-      DATABASE: RECOMMENDED
-      COLUMN: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: any
-    drives: [data_mesh, federated_governance, access_approval]
-    owner_role: DOMAIN_COUNCIL
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: DATA_PRODUCT_OWNER
-    tier: 2
-    category: data_mesh
-    description: >-
-      Product owner accountable for the data product's roadmap, SLA and consumer
-      contract. Distinct from DATA_OWNER (who is accountable for the data itself).
-    value_source: free_text
-    value_format: principal
-    applies_to: [SCHEMA, SHARE, STREAMLIT, APPLICATION]
-    default_requirement: OPTIONAL
-    requirement:
-      SCHEMA: RECOMMENDED
-      SHARE: MANDATORY
-      COLUMN: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: any
-    drives: [data_mesh, sla_management, consumer_contract, access_approval]
-    owner_role: DOMAIN_COUNCIL
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: DATA_PRODUCT_TYPE
-    tier: 2
-    category: data_mesh
-    description: Mesh archetype of the data product; sets default quality and SLA expectations.
-    value_source: controlled_vocabulary
-    allowed_values: [SOURCE_ALIGNED, AGGREGATE, CONSUMER_ALIGNED, SHARED, PLATFORM]
-    applies_to: [SCHEMA, SHARE]
-    default_requirement: OPTIONAL
-    requirement:
-      SCHEMA: RECOMMENDED
-      COLUMN: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: any
-    drives: [data_mesh, discovery, quality_expectation]
-    owner_role: DOMAIN_COUNCIL
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: PHI
-    tier: 2
-    category: privacy
-    description: >-
-      Protected Health Information under HIPAA. Conditionally MANDATORY wherever
-      REGULATION resolves to HIPAA. Drives the HIPAA masking policy set.
-    value_source: controlled_vocabulary
-    allowed_values: ["YES", "NO"]
-    ordinal_values: ["NO", "YES"]
-    applies_to: [SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, EXTERNAL_TABLE, ICEBERG_TABLE, COLUMN, STAGE, SHARE]
-    default_requirement: OPTIONAL
-    requirement:
-      COLUMN: RECOMMENDED
-    inheritance: inherit
-    override_rule: more_restrictive_only
-    drives: [dynamic_masking, hipaa_evidence, privacy_reporting, auto_classification]
-    owner_role: PRIVACY_OFFICE
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: PCI
-    tier: 2
-    category: privacy
-    description: >-
-      Cardholder data in PCI-DSS scope. Conditionally MANDATORY wherever
-      REGULATION resolves to PCI_DSS. Drives tokenisation/masking and CDE scoping.
-    value_source: controlled_vocabulary
-    allowed_values: ["YES", "NO"]
-    ordinal_values: ["NO", "YES"]
-    applies_to: [SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, EXTERNAL_TABLE, ICEBERG_TABLE, COLUMN, STAGE, SHARE]
-    default_requirement: OPTIONAL
-    requirement:
-      COLUMN: RECOMMENDED
-    inheritance: inherit
-    override_rule: more_restrictive_only
-    drives: [dynamic_masking, pci_scoping, audit_evidence, auto_classification]
-    owner_role: CISO_DATA_SECURITY
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: LEGAL_HOLD
-    tier: 2
-    category: compliance
-    description: >-
-      Litigation hold. When YES, all retention-driven archive and purge automation
-      is suppressed regardless of RETENTION_CLASS. Set only by Legal.
+      Litigation hold. When YES, all retention-driven archive and purge
+      automation is suppressed regardless of retention_class. Set only by Legal.
+    platforms: [SNOWFLAKE, COLLIBRA]
     value_source: controlled_vocabulary
     allowed_values: ["YES", "NO"]
     ordinal_values: ["NO", "YES"]
@@ -724,13 +747,347 @@ tags:
     version: "1.0.0"
     status: ACTIVE
 
-  - name: ENCRYPTION_REQUIRED
+  - name: regulation
     tier: 2
+    level: Compliance
+    category: compliance
+    description: >-
+      The governing regulatory REGIME, as distinct from
+      data_classification_regulatory which states what the DATA IS. A financial
+      ledger with no personal data at all is still in SOX scope; the two tags
+      answer different questions and are both needed for evidence.
+    platforms: [SNOWFLAKE, COLLIBRA]
+    value_source: controlled_vocabulary
+    allowed_values: [NONE, SOX, GDPR, CCPA, HIPAA, PCI_DSS, GLBA, FERPA, NERC_CIP, MULTI]
+    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, EXTERNAL_TABLE, COLUMN, STAGE, SHARE]
+    default_requirement: INHERITED
+    requirement:
+      SCHEMA: RECOMMENDED
+      SHARE: MANDATORY
+      COLUMN: OPTIONAL
+    inheritance: inherit
+    override_rule: any
+    drives: [compliance_reporting, audit_evidence, policy_selection, residency_control]
+    owner_role: COMPLIANCE_OFFICE
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: sla_tier
+    tier: 2
+    level: Operational
+    category: operational
+    description: >-
+      Freshness and availability commitment published to consumers. Drives
+      monitoring thresholds, alert routing and DR tiering.
+    platforms: [SNOWFLAKE, DENODO]
+    value_source: controlled_vocabulary
+    allowed_values: [PLATINUM_15M, GOLD_1H, SILVER_4H, BRONZE_24H, BEST_EFFORT]
+    ordinal_values: [BEST_EFFORT, BRONZE_24H, SILVER_4H, GOLD_1H, PLATINUM_15M]
+    applies_to: [SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, PIPE, TASK, STREAM, SHARE]
+    default_requirement: INHERITED
+    requirement:
+      COLUMN: NOT_APPLICABLE
+    inheritance: inherit
+    override_rule: any
+    drives: [sla_management, monitoring_depth, alert_routing, dr_scope]
+    owner_role: PLATFORM_ENGINEERING
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: masking_required
+    tier: 2
+    level: Security
+    category: security
+    description: >-
+      Declares that the column must carry a masking policy. This is DECLARED
+      INTENT; the tag-based policy attachment is ENFORCEMENT. The drift detector
+      reconciles the two, and divergence is the finding that matters most.
+    platforms: [SNOWFLAKE]
+    value_source: controlled_vocabulary
+    allowed_values: ["YES", "NO"]
+    ordinal_values: ["NO", "YES"]
+    applies_to: [TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, EXTERNAL_TABLE, ICEBERG_TABLE, COLUMN]
+    default_requirement: OPTIONAL
+    requirement:
+      COLUMN: RECOMMENDED
+      TABLE: RECOMMENDED
+    inheritance: inherit
+    override_rule: more_restrictive_only
+    drives: [dynamic_masking, control_attestation, drift_detection]
+    owner_role: CISO_DATA_SECURITY
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: row_access_required
+    tier: 2
+    level: Security
+    category: security
+    description: >-
+      Declares that the table or view must carry a row access policy. Snowflake
+      does NOT support attaching row access policies to tags, so enforcement runs
+      through the SP_APPLY_ROW_ACCESS_POLICIES reconciliation task.
+    platforms: [SNOWFLAKE]
+    value_source: controlled_vocabulary
+    allowed_values: ["YES", "NO"]
+    ordinal_values: ["NO", "YES"]
+    applies_to: [TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, EXTERNAL_TABLE, ICEBERG_TABLE]
+    default_requirement: OPTIONAL
+    requirement:
+      TABLE: RECOMMENDED
+      VIEW: RECOMMENDED
+      COLUMN: NOT_APPLICABLE
+    inheritance: inherit
+    override_rule: more_restrictive_only
+    drives: [row_access_policy, control_attestation, drift_detection]
+    owner_role: CISO_DATA_SECURITY
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: data_residency
+    tier: 2
+    level: Compliance
+    category: compliance
+    description: >-
+      Region in which the data must remain. Drives replication scope and
+      cross-region share eligibility.
+    platforms: [AWS, SNOWFLAKE, DENODO]
+    value_source: controlled_vocabulary
+    allowed_values: [US, US_EAST, US_WEST, EU, UK, CANADA, APAC, GLOBAL]
+    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, ICEBERG_TABLE, EXTERNAL_TABLE, STAGE, SHARE]
+    default_requirement: INHERITED
+    requirement:
+      SHARE: RECOMMENDED
+      COLUMN: NOT_APPLICABLE
+    inheritance: inherit
+    override_rule: any
+    drives: [residency_control, replication_control, sharing_control, compliance_reporting]
+    owner_role: COMPLIANCE_OFFICE
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: data_quality_tier
+    tier: 2
+    level: Data Quality
+    category: data_quality
+    description: >-
+      Certified quality level. Set only by the data-quality pipeline once data
+      metric function results are evaluated; never inherited, because a table in
+      a GOLD schema is not GOLD until its own measurements say so.
+    platforms: [SNOWFLAKE, COLLIBRA]
+    value_source: controlled_vocabulary
+    allowed_values: [BRONZE, SILVER, GOLD, PLATINUM]
+    ordinal_values: [BRONZE, SILVER, GOLD, PLATINUM]
+    applies_to: [SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE]
+    default_requirement: OPTIONAL
+    requirement:
+      COLUMN: NOT_APPLICABLE
+    inheritance: explicit_only
+    override_rule: any
+    drives: [quality_reporting, consumer_contract, discovery, certification]
+    owner_role: EDGO
+    version: "1.0.0"
+    status: ACTIVE
+
+# =============================================================================
+# TIER 3 - OPTIONAL / DOMAIN TAGS
+# -----------------------------------------------------------------------------
+# Never enterprise-mandatory. A domain or an operating company may make one
+# locally mandatory through CONTROL.DOMAIN_TAG_POLICY, which can only tighten
+# the enterprise standard, never relax it.
+# =============================================================================
+
+  - name: sub_domain
+    tier: 3
+    level: Data Domain
+    category: business
+    description: Second-level decomposition of domain, for large domains only.
+    platforms: [SNOWFLAKE, COLLIBRA]
+    value_source: reference_data
+    reference_table: REF_SUB_DOMAIN
+    value_format: code_upper
+    applies_to: [SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, TASK, PIPE, STREAM]
+    default_requirement: OPTIONAL
+    inheritance: inherit
+    override_rule: any
+    drives: [discovery, federated_governance, finops_showback]
+    owner_role: DOMAIN_COUNCIL
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: source_system
+    tier: 3
+    level: Application
+    category: business
+    description: System of record the data originates from. Roots lineage at the edge.
+    platforms: [SNOWFLAKE, DENODO, COLLIBRA]
+    value_source: reference_data
+    reference_table: REF_APPLICATION
+    value_format: application_slug
+    applies_to: [SCHEMA, TABLE, VIEW, EXTERNAL_TABLE, ICEBERG_TABLE, STAGE, PIPE, STREAM]
+    default_requirement: OPTIONAL
+    inheritance: inherit
+    override_rule: any
+    drives: [lineage, impact_analysis, discovery]
+    owner_role: DOMAIN_COUNCIL
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: application_owner
+    tier: 3
+    level: Ownership
+    category: ownership
+    description: Accountable owner of the application referenced by the object.
+    platforms: [SNOWFLAKE, COLLIBRA]
+    value_source: free_text
+    value_format: owner_principal
+    applies_to: [DATABASE, SCHEMA, STAGE, PIPE, TASK, INTEGRATION, APPLICATION]
+    default_requirement: OPTIONAL
+    inheritance: inherit
+    override_rule: any
+    drives: [impact_analysis, incident_routing, attestation]
+    owner_role: ENTERPRISE_ARCHITECTURE
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: platform_owner
+    tier: 3
+    level: Ownership
+    category: ownership
+    description: Platform engineering team accountable for the infrastructure object.
+    platforms: [AWS, SNOWFLAKE]
+    value_source: reference_data
+    reference_table: REF_SUPPORT_GROUP
+    value_format: '^GRP-[A-Z0-9-]{3,48}$'
+    applies_to: [ACCOUNT, WAREHOUSE, INTEGRATION, SHARE, ROLE, DATABASE]
+    default_requirement: OPTIONAL
+    inheritance: inherit
+    override_rule: any
+    drives: [incident_routing, platform_attestation, finops_chargeback]
+    owner_role: PLATFORM_ENGINEERING
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: domain_owner
+    tier: 3
+    level: Data Domain
+    category: data_mesh
+    description: Accountable owner of the mesh domain. Normally set once, on the domain's database.
+    platforms: [SNOWFLAKE, COLLIBRA]
+    value_source: free_text
+    value_format: group_principal
+    applies_to: [DATABASE, SCHEMA]
+    default_requirement: OPTIONAL
+    inheritance: inherit
+    override_rule: any
+    drives: [data_mesh, federated_governance, access_approval]
+    owner_role: DOMAIN_COUNCIL
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: data_product_owner
+    tier: 3
+    level: Data Product
+    category: data_mesh
+    description: >-
+      Product owner accountable for the data product's roadmap, SLA and consumer
+      contract. Distinct from data_owner, who is accountable for the data itself.
+    platforms: [SNOWFLAKE, COLLIBRA]
+    value_source: free_text
+    value_format: group_principal
+    applies_to: [SCHEMA, SHARE, STREAMLIT, APPLICATION]
+    default_requirement: OPTIONAL
+    requirement:
+      SHARE: RECOMMENDED
+    inheritance: inherit
+    override_rule: any
+    drives: [data_mesh, sla_management, consumer_contract, access_approval]
+    owner_role: DOMAIN_COUNCIL
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: data_product_type
+    tier: 3
+    level: Data Product
+    category: data_mesh
+    description: Mesh archetype; sets default quality and SLA expectations.
+    platforms: [SNOWFLAKE, COLLIBRA]
+    value_source: controlled_vocabulary
+    allowed_values: [SOURCE_ALIGNED, AGGREGATE, CONSUMER_ALIGNED, SHARED, PLATFORM]
+    applies_to: [SCHEMA, SHARE]
+    default_requirement: OPTIONAL
+    inheritance: inherit
+    override_rule: any
+    drives: [data_mesh, discovery, quality_expectation]
+    owner_role: DOMAIN_COUNCIL
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: capability
+    tier: 3
+    level: Business Capability
+    category: business
+    description: Business capability from the enterprise capability model (L2).
+    platforms: [COLLIBRA]
+    value_source: reference_data
+    reference_table: REF_CAPABILITY
+    value_format: code_upper
+    applies_to: [SCHEMA, TABLE, VIEW, DYNAMIC_TABLE, APPLICATION]
+    default_requirement: OPTIONAL
+    inheritance: inherit
+    override_rule: any
+    drives: [discovery, portfolio_analysis]
+    owner_role: ENTERPRISE_ARCHITECTURE
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: project_code
+    tier: 3
+    level: Financial
+    category: financial
+    description: Capital or programme project funding the workload.
+    platforms: [AWS, SNOWFLAKE]
+    value_source: reference_data
+    reference_table: REF_PROJECT
+    value_format: project_code
+    applies_to: [DATABASE, SCHEMA, WAREHOUSE, TASK, PIPE, NOTEBOOK, STREAMLIT]
+    default_requirement: OPTIONAL
+    inheritance: inherit
+    override_rule: any
+    drives: [finops_chargeback, project_reporting, capitalisation]
+    owner_role: FINANCE_FINOPS
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: cost_allocation_model
+    tier: 3
+    level: Financial
+    category: financial
+    description: >-
+      How this object's consumption is settled with the business. SHOWBACK
+      reports only; CHARGEBACK posts a journal entry to the ERP.
+    platforms: [AWS, SNOWFLAKE]
+    value_source: controlled_vocabulary
+    allowed_values: [SHOWBACK, CHARGEBACK, SHARED_SERVICE, ABSORBED_PLATFORM]
+    applies_to: [DATABASE, SCHEMA, WAREHOUSE]
+    default_requirement: OPTIONAL
+    requirement:
+      WAREHOUSE: RECOMMENDED
+    inheritance: inherit
+    override_rule: any
+    drives: [finops_chargeback, department_reporting]
+    owner_role: FINANCE_FINOPS
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: encryption_required
+    tier: 3
+    level: Security
     category: security
     description: >-
       Declares that application-layer or client-side encryption is required in
-      addition to Snowflake's transparent encryption at rest. Applies mainly to
-      external stages and to columns holding secrets or key material.
+      addition to transparent encryption at rest. Mainly external stages and
+      columns holding secrets or key material.
+    platforms: [AWS, SNOWFLAKE]
     value_source: controlled_vocabulary
     allowed_values: ["YES", "NO"]
     ordinal_values: ["NO", "YES"]
@@ -745,232 +1102,16 @@ tags:
     version: "1.0.0"
     status: ACTIVE
 
-  - name: DATA_QUALITY_TIER
-    tier: 2
-    category: data_quality
-    description: >-
-      Certified quality level of the object. Set only by the data-quality pipeline
-      after DMF results are evaluated; manual promotion requires an exception.
-    value_source: controlled_vocabulary
-    allowed_values: [BRONZE, SILVER, GOLD, PLATINUM]
-    ordinal_values: [BRONZE, SILVER, GOLD, PLATINUM]
-    applies_to: [SCHEMA, TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, ICEBERG_TABLE]
-    default_requirement: OPTIONAL
-    requirement:
-      TABLE: RECOMMENDED
-      VIEW: RECOMMENDED
-      COLUMN: NOT_APPLICABLE
-    inheritance: explicit_only
-    override_rule: any
-    drives: [quality_reporting, consumer_contract, discovery, certification]
-    owner_role: EDGO
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: REFRESH_TYPE
-    tier: 2
-    category: operational
-    description: How the object's data is refreshed. Drives freshness monitoring logic.
-    value_source: controlled_vocabulary
-    allowed_values: [STREAMING, MICRO_BATCH, BATCH_HOURLY, BATCH_DAILY, BATCH_WEEKLY, BATCH_MONTHLY, ON_DEMAND, STATIC]
-    applies_to: [TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, EXTERNAL_TABLE, ICEBERG_TABLE, PIPE, TASK, STREAM]
-    default_requirement: OPTIONAL
-    requirement:
-      TABLE: RECOMMENDED
-      TASK: RECOMMENDED
-      PIPE: RECOMMENDED
-      COLUMN: NOT_APPLICABLE
-    inheritance: explicit_only
-    override_rule: any
-    drives: [freshness_monitoring, sla_management, lineage]
-    owner_role: PLATFORM_ENGINEERING
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: PROJECT_CODE
-    tier: 2
-    category: financial
-    description: >-
-      Capital or programme project funding the workload. Enables project-level
-      cost attribution separate from the steady-state COST_CENTER.
-    value_source: reference_data
-    reference_table: REF_PROJECT
-    value_format: project_code
-    applies_to: [DATABASE, SCHEMA, WAREHOUSE, TASK, PIPE, NOTEBOOK, STREAMLIT]
-    default_requirement: OPTIONAL
-    requirement:
-      COLUMN: NOT_APPLICABLE
-    inheritance: inherit
-    override_rule: any
-    drives: [finops_chargeback, project_reporting, capitalisation]
-    owner_role: FINANCE_FINOPS
-    version: "1.0.0"
-    status: ACTIVE
-
-# =============================================================================
-# TIER 3 - OPTIONAL / DOMAIN-SPECIFIC TAGS
-# Never enterprise-mandatory. Domains may make them locally mandatory through a
-# domain policy registered in CONTROL.DOMAIN_TAG_POLICY. 11 tags.
-# =============================================================================
-
-  - name: CAPABILITY
+  - name: sharing_scope
     tier: 3
-    category: business
-    description: Business capability from the enterprise capability model (L2).
-    value_source: reference_data
-    reference_table: REF_CAPABILITY
-    value_format: code_upper
-    applies_to: [SCHEMA, TABLE, VIEW, DYNAMIC_TABLE, APPLICATION]
-    default_requirement: OPTIONAL
-    inheritance: inherit
-    override_rule: any
-    drives: [discovery, portfolio_analysis]
-    owner_role: ENTERPRISE_ARCHITECTURE
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: SOURCE_SYSTEM
-    tier: 3
-    category: business
-    description: System of record from which the data originates. Supports lineage rooting.
-    value_source: reference_data
-    reference_table: REF_APPLICATION
-    value_format: '^APP-[0-9]{4,8}$'
-    applies_to: [SCHEMA, TABLE, VIEW, EXTERNAL_TABLE, ICEBERG_TABLE, STAGE, PIPE, STREAM]
-    default_requirement: OPTIONAL
-    inheritance: inherit
-    override_rule: any
-    drives: [lineage, impact_analysis, discovery]
-    owner_role: DOMAIN_COUNCIL
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: DATA_RESIDENCY
-    tier: 3
-    category: compliance
-    description: >-
-      ISO-3166 region in which the data must remain. Drives replication and
-      cross-region share eligibility checks.
-    value_source: controlled_vocabulary
-    allowed_values: [GLOBAL, US, EU, UK, APAC, CANADA, LATAM, CHINA, INDIA, JAPAN, AUSTRALIA]
-    applies_to: [DATABASE, SCHEMA, TABLE, VIEW, ICEBERG_TABLE, EXTERNAL_TABLE, STAGE, SHARE]
-    default_requirement: OPTIONAL
-    requirement:
-      SHARE: RECOMMENDED
-    inheritance: inherit
-    override_rule: any
-    drives: [residency_control, replication_control, sharing_control, compliance_reporting]
-    owner_role: COMPLIANCE_OFFICE
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: SENSITIVE_DATA
-    tier: 3
-    category: privacy
-    description: >-
-      Special-category / sensitive data beyond PII (e.g. biometric, union
-      membership, religion, sexual orientation) per GDPR Art. 9.
-    value_source: controlled_vocabulary
-    allowed_values: ["YES", "NO"]
-    ordinal_values: ["NO", "YES"]
-    applies_to: [TABLE, VIEW, COLUMN]
-    default_requirement: OPTIONAL
-    requirement:
-      # RECOMMENDED rather than OPTIONAL because MP_ENTERPRISE_* branches on it:
-      # a signal the masking policy reads must be able to reach the column.
-      COLUMN: RECOMMENDED
-    inheritance: inherit
-    override_rule: more_restrictive_only
-    drives: [dynamic_masking, privacy_reporting, gdpr_ccpa_evidence]
-    owner_role: PRIVACY_OFFICE
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: PROGRAM
-    tier: 3
-    category: financial
-    description: Multi-project programme rollup for executive cost reporting.
-    value_source: reference_data
-    reference_table: REF_PROJECT
-    value_format: '^PRG-[A-Z0-9]{2,4}-[0-9]{3,6}$'
-    applies_to: [DATABASE, SCHEMA, WAREHOUSE, TASK, PIPE]
-    default_requirement: OPTIONAL
-    inheritance: inherit
-    override_rule: any
-    drives: [finops_chargeback, project_reporting]
-    owner_role: FINANCE_FINOPS
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: PRODUCT_CODE
-    tier: 3
-    category: financial
-    description: Commercial product/SKU whose P&L the workload supports.
-    value_source: reference_data
-    reference_table: REF_PRODUCT
-    value_format: code_upper
-    applies_to: [DATABASE, SCHEMA, WAREHOUSE, SHARE]
-    default_requirement: OPTIONAL
-    inheritance: inherit
-    override_rule: any
-    drives: [finops_chargeback, product_pnl]
-    owner_role: FINANCE_FINOPS
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: PRODUCT_OWNER
-    tier: 3
-    category: ownership
-    description: Commercial owner of the PRODUCT_CODE. Distinct from DATA_PRODUCT_OWNER.
-    value_source: free_text
-    value_format: principal
-    applies_to: [DATABASE, SCHEMA, SHARE]
-    default_requirement: OPTIONAL
-    inheritance: inherit
-    override_rule: any
-    drives: [product_pnl, access_approval]
-    owner_role: FINANCE_FINOPS
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: RPO
-    tier: 3
-    category: operational
-    description: Recovery Point Objective as an ISO-8601 duration (e.g. PT15M, P1D).
-    value_source: free_text
-    value_format: duration_iso
-    applies_to: [DATABASE, SCHEMA, TABLE, DYNAMIC_TABLE, ICEBERG_TABLE]
-    default_requirement: OPTIONAL
-    inheritance: inherit
-    override_rule: any
-    drives: [dr_scope, replication_control, sla_management]
-    owner_role: PLATFORM_ENGINEERING
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: RTO
-    tier: 3
-    category: operational
-    description: Recovery Time Objective as an ISO-8601 duration (e.g. PT4H, P1D).
-    value_source: free_text
-    value_format: duration_iso
-    applies_to: [DATABASE, SCHEMA, TABLE, DYNAMIC_TABLE, ICEBERG_TABLE]
-    default_requirement: OPTIONAL
-    inheritance: inherit
-    override_rule: any
-    drives: [dr_scope, sla_management]
-    owner_role: PLATFORM_ENGINEERING
-    version: "1.0.0"
-    status: ACTIVE
-
-  - name: SHARING_SCOPE
-    tier: 3
+    level: Security
     category: security
     description: >-
-      Maximum permitted distribution of the object. Checked before any listing,
-      share or reader-account grant is created.
+      Maximum permitted distribution. Checked before any listing, share or
+      reader-account grant is created.
+    platforms: [SNOWFLAKE, DENODO]
     value_source: controlled_vocabulary
-    allowed_values: [INTERNAL_ONLY, AFFILIATE, PARTNER, PUBLIC_MARKETPLACE, PROHIBITED]
+    allowed_values: [PROHIBITED, INTERNAL_ONLY, AFFILIATE, PARTNER, PUBLIC_MARKETPLACE]
     ordinal_values: [PROHIBITED, INTERNAL_ONLY, AFFILIATE, PARTNER, PUBLIC_MARKETPLACE]
     applies_to: [DATABASE, SCHEMA, TABLE, VIEW, DYNAMIC_TABLE, ICEBERG_TABLE, SHARE]
     default_requirement: OPTIONAL
@@ -983,149 +1124,255 @@ tags:
     version: "1.0.0"
     status: ACTIVE
 
-  - name: COST_ALLOCATION_MODEL
+  - name: refresh_type
     tier: 3
-    category: financial
-    description: >-
-      How this object's consumption is settled with the business.
-      SHOWBACK reports only; CHARGEBACK posts a journal entry to the ERP.
+    level: Operational
+    category: operational
+    description: How the object's data is refreshed. Drives freshness monitoring logic.
+    platforms: [SNOWFLAKE, DENODO]
     value_source: controlled_vocabulary
-    allowed_values: [SHOWBACK, CHARGEBACK, SHARED_SERVICE, ABSORBED_PLATFORM]
-    applies_to: [DATABASE, SCHEMA, WAREHOUSE]
+    allowed_values: [STREAMING, MICRO_BATCH, BATCH_HOURLY, BATCH_DAILY, BATCH_WEEKLY, BATCH_MONTHLY, ON_DEMAND, STATIC]
+    applies_to: [TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE, EXTERNAL_TABLE, ICEBERG_TABLE, PIPE, TASK, STREAM]
     default_requirement: OPTIONAL
     requirement:
-      WAREHOUSE: RECOMMENDED
+      COLUMN: NOT_APPLICABLE
+    inheritance: explicit_only
+    override_rule: any
+    drives: [freshness_monitoring, sla_management, lineage]
+    owner_role: PLATFORM_ENGINEERING
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: rpo
+    tier: 3
+    level: Operational
+    category: operational
+    description: Recovery Point Objective as an ISO-8601 duration (e.g. PT15M, P1D).
+    platforms: [AWS, SNOWFLAKE]
+    value_source: free_text
+    value_format: duration_iso
+    applies_to: [DATABASE, SCHEMA, TABLE, DYNAMIC_TABLE, ICEBERG_TABLE]
+    default_requirement: OPTIONAL
     inheritance: inherit
     override_rule: any
-    drives: [finops_chargeback, department_reporting]
-    owner_role: FINANCE_FINOPS
+    drives: [dr_scope, replication_control, sla_management]
+    owner_role: PLATFORM_ENGINEERING
+    version: "1.0.0"
+    status: ACTIVE
+
+  - name: rto
+    tier: 3
+    level: Operational
+    category: operational
+    description: Recovery Time Objective as an ISO-8601 duration (e.g. PT4H, P1D).
+    platforms: [AWS, SNOWFLAKE]
+    value_source: free_text
+    value_format: duration_iso
+    applies_to: [DATABASE, SCHEMA, TABLE, DYNAMIC_TABLE, ICEBERG_TABLE]
+    default_requirement: OPTIONAL
+    inheritance: inherit
+    override_rule: any
+    drives: [dr_scope, sla_management]
+    owner_role: PLATFORM_ENGINEERING
     version: "1.0.0"
     status: ACTIVE
 
 # =============================================================================
 # CONDITIONAL MANDATES
 # A tag that is not universally mandatory but becomes mandatory when a predicate
-# over other effective tag values holds. Evaluated by SP_VALIDATE_COMPLIANCE
-# against the EFFECTIVE (lineage-resolved) tag values, not just direct ones.
+# over other EFFECTIVE (lineage-resolved) tag values holds.
 # =============================================================================
 conditional_rules:
   - id: CR-001
-    description: HIPAA-regulated objects must declare PHI status at column level.
-    when: { REGULATION: [HIPAA, MULTI] }
-    then_mandatory: [PHI]
-    object_types: [TABLE, VIEW, COLUMN]
-    severity: HIGH
+    description: >-
+      Any column carrying regulated data must declare masking intent, so that
+      declared-versus-enforced drift is detectable for it.
+    when: { data_classification_regulatory: [PII, SPII, PHI, PCI] }
+    then_mandatory: [masking_required]
+    object_types: [COLUMN]
+    severity: CRITICAL
 
   - id: CR-002
-    description: PCI-DSS-regulated objects must declare PCI status at column level.
-    when: { REGULATION: [PCI_DSS, MULTI] }
-    then_mandatory: [PCI]
-    object_types: [TABLE, VIEW, COLUMN]
+    description: >-
+      Cardholder data requires application-layer encryption in addition to
+      Snowflake's transparent encryption at rest.
+    when: { data_classification_regulatory: [PCI] }
+    then_mandatory: [encryption_required]
+    object_types: [TABLE, COLUMN, STAGE]
     severity: CRITICAL
 
   - id: CR-003
     description: >-
-      RESTRICTED and HIGHLY_RESTRICTED data must declare row-level access intent.
-    when: { DATA_CLASSIFICATION: [RESTRICTED, HIGHLY_RESTRICTED] }
-    then_mandatory: [ROW_ACCESS_REQUIRED]
+      RESTRICTED data must declare row-level access intent; confidentiality at
+      this level is rarely satisfied by column masking alone.
+    when: { data_classification_enterprise: [RESTRICTED] }
+    then_mandatory: [row_access_required]
     object_types: [TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE]
     severity: HIGH
 
   - id: CR-004
-    description: PII columns must declare masking intent.
-    when: { PII: ["YES"] }
-    then_mandatory: [MASKING_REQUIRED]
-    object_types: [COLUMN]
-    severity: CRITICAL
+    description: >-
+      Regulated data needs an accountable data owner and a retention class -
+      without both, neither a DSAR nor a purge can be executed.
+    when: { data_classification_regulatory: [PII, SPII, PHI, PCI] }
+    then_mandatory: [data_owner, retention_class]
+    object_types: [SCHEMA, TABLE, VIEW]
+    severity: HIGH
 
   - id: CR-005
     description: >-
-      Objects subject to GDPR/CCPA/LGPD must declare data residency so replication
-      and cross-region sharing can be evaluated.
-    when: { REGULATION: [GDPR, CCPA, LGPD, MULTI] }
-    then_mandatory: [DATA_RESIDENCY]
+      Personal and health data must declare residency so replication and
+      cross-region sharing can be evaluated before, not after, the fact.
+    when: { data_classification_regulatory: [SPII, PHI, PCI] }
+    then_mandatory: [data_residency]
     object_types: [DATABASE, SCHEMA, SHARE]
     severity: HIGH
 
   - id: CR-006
-    description: CRITICAL objects must publish RPO and RTO for DR planning.
-    when: { CRITICALITY: [CRITICAL] }
-    then_mandatory: [RPO, RTO]
+    description: Business-critical objects must publish RPO and RTO for DR planning.
+    when: { criticality: [CRITICAL] }
+    then_mandatory: [rpo, rto]
     object_types: [DATABASE, SCHEMA, TABLE]
     severity: MEDIUM
 
   - id: CR-007
-    description: Anything leaving the account must declare its permitted distribution.
+    description: >-
+      Data leaving the account always needs a named owner, a classification and
+      an explicit distribution scope. There is no version of a share for which
+      this is optional.
     when: { }
-    then_mandatory: [SHARING_SCOPE, DATA_CLASSIFICATION, DATA_PRODUCT_OWNER]
+    then_mandatory: [sharing_scope, data_classification_enterprise, data_owner, data_product]
     object_types: [SHARE]
     severity: CRITICAL
 
   - id: CR-008
-    description: Project-funded workloads must carry the funding programme.
-    when: { COST_ALLOCATION_MODEL: [CHARGEBACK] }
-    then_mandatory: [COST_CENTER]
-    object_types: [WAREHOUSE, DATABASE]
+    description: >-
+      Production workloads must name an on-call queue and an SLA commitment.
+      An unroutable production incident is the failure this prevents.
+    when: { environment: [PRD] }
+    then_mandatory: [support_group, sla_tier]
+    object_types: [SCHEMA, TASK, PIPE]
+    severity: MEDIUM
+
+  - id: CR-009
+    description: >-
+      Chargeback settlement posts a journal entry, which needs a GL cost centre
+      code; `department` alone is not a posting key.
+    when: { cost_allocation_model: [CHARGEBACK] }
+    then_mandatory: [cost_center]
+    object_types: [WAREHOUSE, DATABASE, SCHEMA]
+    severity: MEDIUM
+
+# =============================================================================
+# CONTRADICTION RULES
+# Pairs of tag values that cannot both be true. Unlike conditional mandates,
+# these fire on a value being PRESENT AND WRONG rather than absent, and they are
+# evaluated by SP_VALIDATE_COMPLIANCE check 7.
+# =============================================================================
+contradiction_rules:
+  - id: XR-001
+    description: >-
+      Regulated data cannot be classified PUBLIC or NONE. This combination is
+      almost always a table that was classified before its contents were
+      understood, and it is the single most dangerous state in the estate: the
+      masking policy reads the enterprise classification and lets the data
+      through in clear.
+    if_tag: data_classification_regulatory
+    if_values: [PII, SPII, PHI, PCI]
+    then_tag: data_classification_enterprise
+    forbidden_values: [NONE, PUBLIC]
+    severity: CRITICAL
+
+  - id: XR-002
+    description: >-
+      RESTRICTED data cannot be shared beyond the enterprise. Caught before a
+      listing is created rather than after it is discovered.
+    if_tag: data_classification_enterprise
+    if_values: [RESTRICTED]
+    then_tag: sharing_scope
+    forbidden_values: [PARTNER, PUBLIC_MARKETPLACE]
+    severity: CRITICAL
+
+  - id: XR-003
+    description: >-
+      Cardholder data must never sit in a training environment. PCI-DSS scope
+      follows the data, and a TRAINING account is not in the assessed CDE.
+    if_tag: data_classification_regulatory
+    if_values: [PCI]
+    then_tag: environment
+    forbidden_values: [TRAINING, DEV]
+    severity: CRITICAL
+
+  - id: XR-004
+    description: >-
+      A deprecated or archived object cannot carry a live SLA commitment;
+      consumers reading the catalogue would plan against a promise nobody holds.
+    if_tag: data_lifecycle
+    if_values: [DEPRECATED, ARCHIVED, PENDING_PURGE]
+    then_tag: sla_tier
+    forbidden_values: [PLATINUM_15M, GOLD_1H]
     severity: MEDIUM
 
 # =============================================================================
 # CONFLICT RESOLUTION
 # =============================================================================
-# Snowflake tags are single-valued per object. REGULATION therefore carries the
-# GOVERNING regime, resolved by this precedence (index 0 = highest). The full
-# multi-regime set is held in CONTROL.REGULATORY_SCOPE and surfaced by
-# REPORTING.VW_REGULATORY_SCOPE. When two or more regimes apply, the tag is set
-# to MULTI and the scope table is authoritative.
-regulation_precedence: [HIPAA, PCI_DSS, GLBA, SOX, GDPR, LGPD, PIPEDA, PDPA, CCPA, FERPA, NONE]
+# data_classification_regulatory holds ONE value. Real columns are frequently in
+# several categories at once - a payments record can be PII and PCI together.
+# The tag carries the GOVERNING category by this precedence (index 0 highest),
+# and CONTROL.REGULATORY_SCOPE carries the complete set.
+#
+# Ordered by how prescriptive the mandated technical control is, not by penalty
+# size: satisfying PCI-DSS field handling also satisfies a privacy regime's
+# data-minimisation expectation, but not the reverse.
+regulatory_category_precedence: [PCI, PHI, SPII, PII, NONE]
 
-# Inheritance resolution order for EFFECTIVE tag value. First non-null wins,
+# The regulatory REGIME tag resolves the same way.
+regulation_precedence: [HIPAA, PCI_DSS, NERC_CIP, GLBA, SOX, GDPR, CCPA, FERPA, NONE]
+
+# Inheritance resolution order for the EFFECTIVE tag value. First non-null wins,
 # except where override_rule = more_restrictive_only, in which case the most
-# restrictive value found anywhere in the lineage wins regardless of depth.
+# restrictive value anywhere in the lineage wins regardless of depth.
 inheritance_precedence: [COLUMN, TABLE, SCHEMA, DATABASE, ACCOUNT]
 
 # =============================================================================
 # TAG -> POLICY BINDINGS
-# Snowflake supports TAG-BASED MASKING POLICIES (ALTER TAG ... SET MASKING POLICY)
-# with at most ONE policy per data type per tag. It does NOT support tag-based
-# ROW ACCESS policies - those are reconciled by SP_APPLY_ROW_ACCESS_POLICIES.
 # =============================================================================
 masking_bindings:
   # ONE binding, by design.
   #
   # Snowflake attaches at most one masking policy per data type per tag, and a
-  # column can only ever be protected by one masking policy. If PII, PHI, PCI and
-  # DATA_CLASSIFICATION each carried their own policy, a column tagged both PII
-  # and RESTRICTED would have two candidate policies for the same data type and
-  # the winner would depend on tag-lineage proximity rather than on risk. That is
-  # an unacceptable property for a privacy control.
+  # column can only ever be protected by one masking policy. If both
+  # classification tags carried policies, a column tagged RESTRICTED and PCI
+  # would have two candidates for the same data type and the winner would depend
+  # on tag-lineage proximity rather than on which control is stronger. That is an
+  # unacceptable property for a privacy control.
   #
-  # So the framework binds policies to exactly ONE tag - DATA_CLASSIFICATION,
-  # which is MANDATORY on every table and view and therefore propagates to every
-  # column of a matching type through tag lineage - and the policy body branches
-  # on the other signals via SYSTEM$GET_TAG_ON_CURRENT_COLUMN. Result: five
-  # policies instead of fifteen, deterministic resolution, and adding a new
-  # privacy signal changes a policy body rather than the attachment graph.
-  - tag: DATA_CLASSIFICATION
+  # So policies bind to data_classification_enterprise only - it is mandatory on
+  # every table and view, so lineage carries it to every column of a matching
+  # type - and the body branches on data_classification_regulatory.
+  - tag: data_classification_enterprise
     policy_prefix: MP_ENTERPRISE
     data_types: [STRING, NUMBER, DATE, TIMESTAMP_NTZ, VARIANT]
-    # Tags the policy body reads at run time. Every one of these MUST be at least
-    # RECOMMENDED on COLUMN, otherwise the branch silently never fires and the
-    # control degrades without any error. Enforced by validate_catalog.py.
-    policy_reads_tags: [PII, PHI, PCI, SENSITIVE_DATA, MASKING_REQUIRED]
+    # Tags the policy body reads at run time. Each MUST be at least RECOMMENDED
+    # on COLUMN or the branch silently never fires and the control degrades with
+    # no error anywhere. Enforced by validate_catalog.py.
+    policy_reads_tags: [data_classification_regulatory, masking_required]
     note: >-
-      Bound to DATA_CLASSIFICATION only. PII/PHI/PCI deliberately carry NO
-      policy attachment of their own - they are read inside the policy body.
+      Bound to data_classification_enterprise only.
+      data_classification_regulatory deliberately carries no attachment of its
+      own - it is read inside the policy body.
 
 row_access_bindings:
-  - tag: ROW_ACCESS_REQUIRED
+  - tag: row_access_required
     value: "YES"
-    policy: RAP_BUSINESS_UNIT_SCOPE
+    policy: RAP_OPERATING_COMPANY_SCOPE
     applies_to: [TABLE, VIEW, MATERIALIZED_VIEW, DYNAMIC_TABLE]
     mapping_table: CONTROL.ROW_ACCESS_ENTITLEMENT
     note: >-
-      Applied by reconciliation task, not by tag attachment. The policy signature
-      is resolved from the table's own BUSINESS_UNIT column if present, else the
-      table is registered in CONTROL.ROW_ACCESS_EXCEPTION for manual binding.
+      Applied by a reconciliation task, not by tag attachment, because Snowflake
+      does not support attaching row access policies to tags. The policy binds to
+      the table's own OPERATING_COMPANY column; a table declaring the tag without
+      that column is reported as CRITICAL rather than skipped.
 
 # =============================================================================
 # LIFECYCLE

@@ -13,12 +13,66 @@ import catalog as C
 sys.path.insert(0, "scripts")
 
 
-def test_tier_sizes_match_published_framework(cat):
-    """The README and docs quote these counts; they must stay true."""
-    assert len(C.tags(cat, 1)) == 17
-    assert len(C.tags(cat, 2)) == 14
-    assert len(C.tags(cat, 3)) == 11
-    assert len(cat["tags"]) == 42
+# The ten tags of the published FinOps Tagging Strategy, and their Mandatory
+# column. This is the contract between the slide every team has been shown and
+# what this repository actually deploys.
+PUBLISHED_HIERARCHY = {
+    "operating_company": "MANDATORY",
+    "department": "MANDATORY",
+    "domain": "MANDATORY",
+    "team": "MANDATORY",
+    "application": "MANDATORY",
+    "workload_type": "MANDATORY",
+    "owner_user": "RECOMMENDED",
+    "environment": "MANDATORY",
+    "data_classification_enterprise": "MANDATORY",
+    "data_classification_regulatory": "MANDATORY",
+}
+
+
+def test_tier1_is_exactly_the_published_hierarchy(cat, by_name):
+    """Tier 1 is not a place to park a tag someone would like to be important."""
+    tier1 = {t["name"] for t in C.tags(cat, 1)}
+    assert tier1 == set(PUBLISHED_HIERARCHY), (
+        f"Tier 1 has drifted from the published standard. "
+        f"Extra: {sorted(tier1 - set(PUBLISHED_HIERARCHY))}; "
+        f"missing: {sorted(set(PUBLISHED_HIERARCHY) - tier1)}")
+
+
+def test_mandatory_column_matches_the_published_standard(by_name):
+    """A tag the slide calls Recommended must not be enforced as Mandatory."""
+    for name, expected in PUBLISHED_HIERARCHY.items():
+        assert by_name[name]["hierarchy_requirement"] == expected
+
+
+def test_reference_allowed_values_are_reproduced_exactly(by_name):
+    """The vocabularies come from the enterprise standard, not from taste."""
+    assert by_name["operating_company"]["allowed_values"] == [
+        "OPCO_AEP_OHIO", "OPCO_AEP_TEXAS", "OPCO_APPALACHIAN",
+        "OPCO_AEP_INDIANA_MICHIGAN", "OPCO_KENTUCKY_POWER",
+        "OPCO_PSC_OKLAHOMA", "OPCO_SEPC", "SHARED"]
+    assert by_name["environment"]["allowed_values"] == [
+        "PRD", "UAT", "TST", "DEV", "TRAINING", "BACKUP"]
+    assert by_name["data_classification_enterprise"]["allowed_values"] == [
+        "NONE", "PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"]
+    assert by_name["data_classification_regulatory"]["allowed_values"] == [
+        "NONE", "PII", "SPII", "PHI", "PCI"]
+    assert by_name["workload_type"]["allowed_values"] == [
+        "INGEST", "TRANSFORM", "ANALYTICS", "ML_TRAIN", "ML_SERVE", "BI",
+        "GOVERNANCE", "PLATFORM_OPS"]
+    assert set(by_name["department"]["allowed_values"]) == {
+        "FINANCE", "HR", "MARKETING", "DISTRIBUTION", "GENERATION", "COMOPS",
+        "GIS", "CORPORATE", "CUSTOMER", "SHARED_SERVICES"}
+    assert set(by_name["domain"]["allowed_values"]) == {
+        "CUSTOMER", "LOCATION", "METER", "FINANCE", "SUPPLY_CHAIN",
+        "MARKETING", "RISK", "TELEMETRY"}
+
+
+def test_tier_sizes(cat):
+    assert len(C.tags(cat, 1)) == 10
+    assert len(C.tags(cat, 2)) == 15
+    assert len(C.tags(cat, 3)) == 15
+    assert len(cat["tags"]) == 40
 
 
 def test_every_tag_has_a_consumer(cat):
@@ -29,9 +83,9 @@ def test_every_tag_has_a_consumer(cat):
 
 def test_control_tags_use_most_restrictive_resolution(cat, by_name):
     """AP-09: nearest-wins on a control tag silently unmasks data."""
-    controls = ["DATA_CLASSIFICATION", "PII", "PHI", "PCI", "SENSITIVE_DATA",
-                "MASKING_REQUIRED", "ROW_ACCESS_REQUIRED", "ENCRYPTION_REQUIRED",
-                "LEGAL_HOLD", "CRITICALITY"]
+    controls = ["data_classification_enterprise", "data_classification_regulatory",
+                "masking_required", "row_access_required", "encryption_required",
+                "legal_hold", "criticality"]
     for name in controls:
         tag = by_name[name]
         assert tag["override_rule"] == "more_restrictive_only", (
@@ -43,29 +97,32 @@ def test_control_tags_use_most_restrictive_resolution(cat, by_name):
 def test_ordinals_run_least_to_most_restrictive(by_name):
     """VW_EFFECTIVE_TAG ranks by ORDINAL_POSITION descending, so the ordering
     direction is load-bearing, not documentation."""
-    assert by_name["DATA_CLASSIFICATION"]["ordinal_values"] == [
-        "PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED", "HIGHLY_RESTRICTED"]
-    assert by_name["PII"]["ordinal_values"] == ["NO", "YES"]
-    assert by_name["CRITICALITY"]["ordinal_values"] == [
+    assert by_name["data_classification_enterprise"]["ordinal_values"] == [
+        "NONE", "PUBLIC", "INTERNAL", "CONFIDENTIAL", "RESTRICTED"]
+    # Ordered by how prescriptive the mandated technical control is. A column
+    # that is both PII and PCI carries PCI, and PCI handling is a superset.
+    assert by_name["data_classification_regulatory"]["ordinal_values"] == [
+        "NONE", "PII", "SPII", "PHI", "PCI"]
+    assert by_name["criticality"]["ordinal_values"] == [
         "LOW", "MEDIUM", "HIGH", "CRITICAL"]
 
 
 def test_environment_cannot_be_overridden(by_name):
-    """Section 4.6: a schema inside a PROD database must not declare itself DEV."""
-    assert by_name["ENVIRONMENT"]["override_rule"] == "none"
-    assert by_name["DATA_PRODUCT"]["override_rule"] == "none"
+    """Section 4.6: a schema inside a PRD database must not declare itself DEV."""
+    assert by_name["environment"]["override_rule"] == "none"
+    assert by_name["data_product"]["override_rule"] == "none"
 
 
 def test_quality_tier_is_never_inherited(by_name):
     """Certification is measured, not inherited from a neighbour."""
-    assert by_name["DATA_QUALITY_TIER"]["inheritance"] == "explicit_only"
+    assert by_name["data_quality_tier"]["inheritance"] == "explicit_only"
 
 
 def test_exactly_one_tag_carries_masking_attachments(cat):
     """Two attached tags means a column carrying both has two candidate policies
     and resolution depends on lineage proximity rather than on risk."""
     bound = {b["tag"] for b in cat["masking_bindings"]}
-    assert bound == {"DATA_CLASSIFICATION"}
+    assert bound == {"data_classification_enterprise"}
 
 
 def test_masking_policy_signals_reach_columns(cat, by_name):
@@ -90,19 +147,26 @@ def test_row_access_binding_is_reconciled_not_attached(cat):
     implying otherwise would produce SQL that fails at deploy time."""
     assert cat["row_access_bindings"], "row access binding must be declared"
     for b in cat["row_access_bindings"]:
-        assert b["tag"] == "ROW_ACCESS_REQUIRED"
+        assert b["tag"] == "row_access_required"
         assert b["value"] == "YES"
         assert isinstance(b["value"], str)
 
 
-def test_regulation_precedence_is_total(by_name, cat):
-    """An unresolvable regime is a silent gap in compliance reporting."""
-    declared = set(by_name["REGULATION"]["allowed_values"]) - {"MULTI"}
-    precedence = cat["regulation_precedence"]
-    assert set(precedence) == declared
-    assert len(precedence) == len(set(precedence))
-    assert precedence[0] == "HIPAA", "most prescriptive regime must rank first"
-    assert precedence[-1] == "NONE"
+def test_precedence_lists_are_total(by_name, cat):
+    """An unresolvable governing value is a silent gap in compliance reporting."""
+    for tag_name, key in (("data_classification_regulatory",
+                           "regulatory_category_precedence"),
+                          ("regulation", "regulation_precedence")):
+        declared = set(by_name[tag_name]["allowed_values"]) - {"MULTI"}
+        precedence = cat[key]
+        assert set(precedence) == declared
+        assert len(precedence) == len(set(precedence))
+        assert precedence[-1] == "NONE", f"{key} must end at NONE"
+
+    # PCI-DSS dictates specific handling of specific fields; a privacy regime
+    # mandates outcomes. The most prescriptive control ranks first.
+    assert cat["regulatory_category_precedence"][0] == "PCI"
+    assert cat["regulation_precedence"][0] == "HIPAA"
 
 
 def test_mandatory_load_stays_within_budget(cat):
@@ -114,19 +178,23 @@ def test_mandatory_load_stays_within_budget(cat):
 
 
 def test_expected_mandatory_counts(cat):
-    """Pinned because docs/02 §2.4 publishes these figures."""
-    expected = {"SCHEMA": 10, "DATABASE": 8, "TABLE": 6, "SHARE": 5,
-                "WAREHOUSE": 4, "VIEW": 4, "COLUMN": 2}
+    """Pinned because docs/02 publishes these figures as the adoption argument."""
+    expected = {"DATABASE": 6, "SCHEMA": 5, "WAREHOUSE": 6, "TABLE": 2,
+                "VIEW": 2, "COLUMN": 1, "TASK": 3, "PIPE": 3, "SHARE": 5}
     for ot, n in expected.items():
         actual = sum(1 for t in C.tags(cat) if C.requirement(t, ot) == "MANDATORY")
         assert actual == n, f"{ot}: expected {n} mandatory tags, found {actual}"
 
 
-def test_tier1_tags_are_mandatory_somewhere(cat):
+def test_tier1_tags_are_enforced_at_their_declared_level(cat, by_name):
     for t in C.tags(cat, 1):
-        assert any(C.requirement(t, ot) == "MANDATORY"
-                   for ot in cat["object_types"]["all"]), \
-            f"{t['name']} is Tier 1 but mandatory nowhere"
+        levels = {C.requirement(t, ot) for ot in cat["object_types"]["all"]}
+        if t["hierarchy_requirement"] == "MANDATORY":
+            assert "MANDATORY" in levels, f"{t['name']} is mandatory nowhere"
+        else:
+            assert "MANDATORY" not in levels, (
+                f"{t['name']} is Recommended in the standard but enforced as "
+                f"mandatory here")
 
 
 def test_controlled_values_are_strings_not_yaml_booleans(cat):
@@ -148,12 +216,59 @@ def test_allowed_values_within_snowflake_limits(cat):
 
 
 def test_tag_names_follow_the_convention(cat):
+    """Lowercase snake_case: AWS tag keys are case-sensitive, so the canonical
+    form has to be exact."""
     for t in cat["tags"]:
-        assert C.TAG_NAME_RE.match(t["name"])
-        assert not re.match(r"^(TAG|ENT|CORP)_", t["name"]), \
+        assert C.TAG_NAME_RE.match(t["name"]), t["name"]
+        assert t["name"] == t["name"].lower()
+        assert not re.match(r"^(tag|ent|corp)_", t["name"]), \
             f"{t['name']}: prefixes add length and distinguish nothing"
-        assert not re.match(r"^(IS|HAS)_", t["name"]), \
+        assert not re.match(r"^(is|has)_", t["name"]), \
             f"{t['name']}: boolean tags are named for the positive assertion"
+
+
+def test_snowflake_identifiers_do_not_collide(cat):
+    """Two keys that fold to one Snowflake identifier are two allocation buckets
+    on AWS and one in Snowflake."""
+    folded = [C.snowflake_name(t) for t in cat["tags"]]
+    assert len(folded) == len(set(folded))
+
+
+def test_every_tag_declares_its_platforms(cat):
+    valid = {p["id"] for p in cat["platforms"]}
+    for t in cat["tags"]:
+        assert t.get("platforms"), f"{t['name']} names no platform"
+        assert set(t["platforms"]) <= valid, t["name"]
+
+
+def test_every_tag_declares_a_hierarchy_level(cat):
+    for t in cat["tags"]:
+        assert t.get("level"), f"{t['name']} has no hierarchy level"
+
+
+def test_contradiction_rules_are_evaluable(cat, by_name):
+    """A contradiction rule over a free-text tag cannot fire, which would report
+    a control as covered while nothing checks it."""
+    assert cat["contradiction_rules"], "the contradiction rule set must not be empty"
+    for rule in cat["contradiction_rules"]:
+        for field, values in (("if_tag", "if_values"),
+                              ("then_tag", "forbidden_values")):
+            tag = by_name[rule[field]]
+            assert tag.get("allowed_values"), f"{rule['id']}: {field} has no vocabulary"
+            for v in rule[values]:
+                assert v in tag["allowed_values"], f"{rule['id']}: bad value {v}"
+        assert rule["if_tag"] != rule["then_tag"]
+
+
+def test_regulated_data_cannot_be_public(cat):
+    """XR-001 is the rule that catches the one state scoring 100% on coverage
+    while leaving data in clear. It must exist."""
+    rule = next(r for r in cat["contradiction_rules"] if r["id"] == "XR-001")
+    assert rule["if_tag"] == "data_classification_regulatory"
+    assert set(rule["if_values"]) == {"PII", "SPII", "PHI", "PCI"}
+    assert rule["then_tag"] == "data_classification_enterprise"
+    assert set(rule["forbidden_values"]) == {"NONE", "PUBLIC"}
+    assert rule["severity"] == "CRITICAL"
 
 
 def test_conditional_rules_are_enforceable(cat, by_name):
@@ -173,7 +288,8 @@ def test_share_rule_is_unconditional(cat):
     assert rule["when"] in ({}, None)
     assert rule["object_types"] == ["SHARE"]
     assert set(rule["then_mandatory"]) == {
-        "SHARING_SCOPE", "DATA_CLASSIFICATION", "DATA_PRODUCT_OWNER"}
+        "sharing_scope", "data_classification_enterprise", "data_owner",
+        "data_product"}
     assert rule["severity"] == "CRITICAL"
 
 
@@ -196,13 +312,33 @@ def test_value_formats_compile_and_accept_their_own_values(cat):
 
 
 @pytest.mark.parametrize("sample,should_match", [
-    ("jane.doe@example.com", True),
-    ("GRP-DATA-PLATFORM", True),
-    ("not an email", False),
+    ("abc.xyz@aep.com", True),
+    ("service-account-ingest", True),
+    ("the platform team", False),
     ("", False),
 ])
-def test_principal_format(cat, sample, should_match):
-    pattern = re.compile(cat["value_formats"]["principal"])
+def test_owner_principal_format(cat, sample, should_match):
+    pattern = re.compile(cat["value_formats"]["owner_principal"])
+    assert bool(pattern.match(sample)) is should_match
+
+
+@pytest.mark.parametrize("sample,should_match", [
+    ("team-customer-360", True), ("team-revenue-platform", True),
+    ("team-mlops-core", True),
+    ("Team-Customer", False), ("customer-360", False), ("team-", False),
+])
+def test_team_slug_format(cat, sample, should_match):
+    pattern = re.compile(cat["value_formats"]["team_slug"])
+    assert bool(pattern.match(sample)) is should_match
+
+
+@pytest.mark.parametrize("sample,should_match", [
+    ("app-cust360-api", True), ("app-finmart-dbt", True),
+    ("app-pricing-ml", True), ("app-collibra-conn", True),
+    ("APP-10457", False), ("cust360-api", False),
+])
+def test_application_slug_format(cat, sample, should_match):
+    pattern = re.compile(cat["value_formats"]["application_slug"])
     assert bool(pattern.match(sample)) is should_match
 
 

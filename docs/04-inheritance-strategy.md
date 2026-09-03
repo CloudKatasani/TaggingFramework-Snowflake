@@ -19,24 +19,37 @@ others. That is what this chapter defines and `VW_EFFECTIVE_TAG` implements.
   ACCOUNT ─────────────────────────── enterprise defaults (rare; a floor)
      │
      ▼
-  DATABASE ────────────────────────── BUSINESS_UNIT, ENVIRONMENT, COST_CENTER,
-     │                                DOMAIN, SUPPORT_GROUP, CRITICALITY,
-     │                                DATA_OWNER, DATA_CLASSIFICATION
+  DATABASE ────────────────────────── operating_company, department, domain,
+     │                                team, environment,
+     │                                data_classification_enterprise
      ▼
-  SCHEMA ──────────────────────────── DATA_PRODUCT, DATA_STEWARD, SLA_TIER,
-     │                                RETENTION_CLASS, REGULATION,
-     │                                DATA_LIFECYCLE  (the data product boundary)
+  SCHEMA ──────────────────────────── application, domain, team,
+     │                                both classification tags,
+     │                                data_product, retention_class, sla_tier
      ▼
-  TABLE / VIEW ────────────────────── PII, ROW_ACCESS_REQUIRED,
-     │                                classification overrides
+  TABLE / VIEW ────────────────────── classification escalations,
+     │                                row_access_required
      ▼
-  COLUMN ──────────────────────────── PII, MASKING_REQUIRED, PHI, PCI,
-                                      SENSITIVE_DATA  (the enforcement point)
+  COLUMN ──────────────────────────── data_classification_regulatory,
+                                      masking_required    (the enforcement point)
 ```
 
-Warehouses, stages, pipes, tasks and streams sit outside this chain. A warehouse
-belongs to no database, so it must carry its own `BUSINESS_UNIT`, `ENVIRONMENT`
-and `COST_CENTER` directly — which is exactly why those three are mandatory on it.
+### Objects outside the chain
+
+Warehouses, stages, pipes, tasks and streams sit outside this hierarchy. A
+warehouse belongs to no database, so **nothing is inherited** — all six
+allocation tags must be set directly:
+
+```
+  WAREHOUSE ───── operating_company, department, team, application,
+                  workload_type, environment          (6 direct assignments)
+```
+
+This is the single most common source of unallocated spend in a Snowflake
+estate, and it is worth stating plainly: databases get their tags once and
+inherit them across ten thousand objects; every warehouse is six separate
+decisions that nothing corrects for you. `VW_UNALLOCATED_SPEND` therefore names
+the specific missing keys per warehouse rather than reporting a total.
 
 ## 4.3 Two resolution modes
 
@@ -75,9 +88,9 @@ Two things happen there, and both matter:
    `VW_EFFECTIVE_TAG` still resolves `RESTRICTED`, because it ranks by ordinal
    severity before proximity. The read path does not trust the write path.
 
-Applied to: `DATA_CLASSIFICATION`, `PII`, `PHI`, `PCI`, `SENSITIVE_DATA`,
-`CRITICALITY`, `MASKING_REQUIRED`, `ROW_ACCESS_REQUIRED`, `ENCRYPTION_REQUIRED`,
-`LEGAL_HOLD`.
+Applied to: `data_classification_enterprise`, `data_classification_regulatory`,
+`criticality`, `masking_required`, `row_access_required`, `encryption_required`,
+`legal_hold`.
 
 **Why depth does not win for controls.** Under nearest-wins, a steward tagging a
 column `PII = NO` inside a table marked `PII = YES` silently unmasks it. That is
@@ -87,7 +100,7 @@ without realising the blast radius. Most-restrictive-wins makes it impossible.
 
 ### No-override (`override_rule: none`)
 
-`ENVIRONMENT` and `DATA_PRODUCT`. A schema inside `CUSTOMER_PROD` cannot declare
+`environment` and `data_product`. A schema inside `CUSTOMER_PRD` cannot declare
 itself `DEV`; a table cannot belong to a different data product than its schema.
 These are structural facts about where the object lives, not judgements about it.
 
@@ -117,8 +130,8 @@ Two boundaries that cause real incidents when assumed away.
 **Views do not inherit from their base tables.** A view over a table containing
 PII is a separate object with its own tags. Nothing in Snowflake or in this
 framework propagates a base table's classification to a view built on it — and a
-view is precisely how masked data gets re-exposed. `DATA_CLASSIFICATION` and `PII`
-are therefore mandatory on `VIEW`, not inherited, and CR-003 applies to views.
+view is precisely how masked data gets re-exposed. Both classification tags are therefore mandatory on `VIEW`, not inherited, and
+CR-003 applies to views.
 Where a view's own tags are weaker than its sources', that is a finding, not an
 inference the platform can safely make for you.
 
@@ -128,16 +141,16 @@ regulated data out of the governed perimeter in any Snowflake estate. Mitigation
 in order of effectiveness: the nightly scan finds it within 24 hours; the
 classification job re-detects the PII within 24 hours; CI/CD tags objects at
 creation for anything deployed through the pipeline. Ad-hoc CTAS in a personal
-schema remains a genuine residual risk, which is why `ENVIRONMENT = SANDBOX`
+schema remains a genuine residual risk, which is why `environment ∈ (DEV, TST, TRAINING)`
 databases are excluded from sharing eligibility altogether.
 
 ## 4.6 The clone problem
 
 `CREATE DATABASE ... CLONE` copies tags with the objects. That is usually
-desirable and for `ENVIRONMENT` it is exactly wrong.
+desirable and for `environment` it is exactly wrong.
 
-Cloning `CUSTOMER_PROD` to refresh `CUSTOMER_UAT` produces a UAT database whose
-every object insists it is `PROD`. The consequences are quiet and expensive:
+Cloning `CUSTOMER_PRD` to refresh `CUSTOMER_UAT` produces a UAT database whose
+every object insists it is `PRD`. The consequences are quiet and expensive:
 
 - UAT compute bills to the production cost centre — a real misstatement in the
   chargeback report, not a rounding error;
@@ -155,18 +168,18 @@ operation:
 CALL GOVERNANCE.AUTOMATION.SP_REMEDIATE_CLONE_TAGS('CUSTOMER_UAT', 'UAT', FALSE);
 ```
 
-It rewrites `ENVIRONMENT` on every directly-tagged object in the clone, and raises
-a finding for any `DATA_QUALITY_TIER` carried in — a clone is not a certified data
+It rewrites `environment` on every directly-tagged object in the clone, and raises
+a finding for any `data_quality_tier` carried in — a clone is not a certified data
 product, and certification must be re-earned rather than copied.
 
 ## 4.7 Practical guidance by level
 
 | Level | Set here | Never set here |
 |---|---|---|
-| **Database** | `BUSINESS_UNIT`, `ENVIRONMENT`, `COST_CENTER`, `DOMAIN`, `SUPPORT_GROUP`, `DATA_OWNER`, `CRITICALITY`, baseline `DATA_CLASSIFICATION` | `PII` — no database is uniformly PII, and asserting it makes the tag meaningless |
-| **Schema** | `DATA_PRODUCT`, `DATA_STEWARD`, `SLA_TIER`, `RETENTION_CLASS`, `REGULATION`, `DATA_LIFECYCLE` | `MASKING_REQUIRED` — it is a column-level assertion |
-| **Table/View** | `PII`, `ROW_ACCESS_REQUIRED`, classification *escalations* | `BUSINESS_UNIT`, `COST_CENTER` — inherit them; per-table finance tags are unmaintainable |
-| **Column** | `PII`, `PHI`, `PCI`, `MASKING_REQUIRED`, `SENSITIVE_DATA` | Anything descriptive — 200 million rows of `DOMAIN` help nobody |
+| **Database** | `operating_company`, `department`, `domain`, `team`, `environment`, baseline `data_classification_enterprise` | `data_classification_regulatory` — no database is uniformly PCI, and asserting it makes the tag meaningless |
+| **Schema** | `application`, `data_product`, `data_steward`, `sla_tier`, `retention_class`, `data_lifecycle`, both classifications | `masking_required` — it is a column-level assertion |
+| **Table/View** | classification *escalations*, `row_access_required` | `operating_company`, `department`, `cost_center` — inherit them; per-table finance tags are unmaintainable |
+| **Column** | `data_classification_regulatory`, `masking_required` | Anything descriptive — 200 million rows of `domain` help nobody |
 
 The single most useful heuristic: **if you find yourself setting the same tag
 value on every object in a schema, it belonged on the schema.**

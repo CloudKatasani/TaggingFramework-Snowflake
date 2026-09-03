@@ -52,9 +52,12 @@ resource "snowflake_schema" "governance" {
 resource "snowflake_tag" "enterprise" {
   for_each = var.tags
 
-  database       = var.governance_database
-  schema         = snowflake_schema.governance[var.tag_schema].name
-  name           = each.key
+  database = var.governance_database
+  schema   = snowflake_schema.governance[var.tag_schema].name
+  # each.key is the lowercase canonical key; Snowflake folds it to upper case.
+  # Declaring the folded form explicitly keeps the Terraform plan stable instead
+  # of showing a perpetual diff between the requested and returned identifier.
+  name           = upper(each.key)
   comment        = each.value.comment
   allowed_values = each.value.allowed_values
 
@@ -150,10 +153,15 @@ resource "snowflake_warehouse" "governance" {
 # nobody else will believe the allocation either.
 # -----------------------------------------------------------------------------
 resource "snowflake_tag_association" "governance_warehouse" {
+  # Snowflake folds unquoted identifiers to upper case, so these keys are the
+  # upper-cased form of the lowercase canonical keys in the catalog.
   for_each = {
-    BUSINESS_UNIT = var.platform_business_unit
-    ENVIRONMENT   = var.environment
-    COST_CENTER   = var.platform_cost_center
+    OPERATING_COMPANY = var.platform_operating_company
+    DEPARTMENT        = var.platform_department
+    TEAM              = var.platform_team
+    APPLICATION       = var.platform_application
+    WORKLOAD_TYPE     = "GOVERNANCE"
+    ENVIRONMENT       = var.environment
   }
 
   object_identifiers = [snowflake_warehouse.governance.fully_qualified_name]

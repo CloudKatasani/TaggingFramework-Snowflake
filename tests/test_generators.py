@@ -49,7 +49,10 @@ def test_generated_ddl_is_idempotent_in_shape(tag_ddl, cat):
     """Every tag is created with IF NOT EXISTS and updated with ALTER, so the
     file is safe to re-run against a populated account."""
     for t in cat["tags"]:
-        fq = f"GOVERNANCE.TAGS.{t['name']}"
+        # Canonical keys are lowercase; Snowflake folds unquoted identifiers to
+        # upper case, and the DDL is emitted in the folded form so that every
+        # downstream join against ACCOUNT_USAGE matches without quoting.
+        fq = f"GOVERNANCE.TAGS.{C.snowflake_name(t)}"
         assert f"CREATE TAG IF NOT EXISTS {fq}" in tag_ddl
         assert f"ALTER TAG {fq} SET COMMENT" in tag_ddl
 
@@ -57,7 +60,8 @@ def test_generated_ddl_is_idempotent_in_shape(tag_ddl, cat):
 def test_vocabulary_changes_deploy_additively(tag_ddl, cat):
     for t in cat["tags"]:
         if t.get("allowed_values"):
-            assert f"ALTER TAG GOVERNANCE.TAGS.{t['name']} ADD ALLOWED_VALUES" in tag_ddl
+            assert (f"ALTER TAG GOVERNANCE.TAGS.{C.snowflake_name(t)} "
+                    f"ADD ALLOWED_VALUES") in tag_ddl
 
 
 # ---------------------------------------------------------------------------
@@ -81,8 +85,8 @@ def test_none_becomes_null():
 
 
 def test_seed_preserves_regex_semantics(seed, cat):
-    """The email/principal regex must survive the round trip into SQL intact."""
-    principal = cat["value_formats"]["principal"]
+    """The owner-principal regex must survive the round trip into SQL intact."""
+    principal = cat["value_formats"]["owner_principal"]
     assert principal.replace("\\", "\\\\") in seed
 
 
@@ -137,15 +141,27 @@ def test_masking_bindings_emit_one_alter_per_data_type(cat):
     out = generate_sql.gen_masking_bindings(cat)
     for b in cat["masking_bindings"]:
         for dt in b["data_types"]:
-            assert (f"ALTER TAG GOVERNANCE.TAGS.{b['tag']} SET MASKING POLICY "
+            assert (f"ALTER TAG GOVERNANCE.TAGS.{C.snowflake_name(b['tag'])} "
+                    f"SET MASKING POLICY "
                     f"GOVERNANCE.POLICIES.{b['policy_prefix']}_{dt};") in out
 
 
-def test_no_masking_attachment_for_privacy_tags(cat):
-    """PII/PHI/PCI are read inside the policy body, never attached."""
+def test_no_masking_attachment_for_the_regulatory_tag(cat):
+    """data_classification_regulatory is read inside the policy body, never
+    attached: two attached tags would make the winning policy depend on lineage
+    proximity rather than on which control is stronger."""
     out = generate_sql.gen_masking_bindings(cat)
-    for tag in ("PII", "PHI", "PCI", "SENSITIVE_DATA"):
-        assert f"ALTER TAG GOVERNANCE.TAGS.{tag} SET MASKING POLICY" not in out
+    assert ("ALTER TAG GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY "
+            "SET MASKING POLICY") not in out
+
+
+def test_seed_keys_registry_on_the_snowflake_identifier(seed, cat):
+    """TAG_CATALOG is joined to ACCOUNT_USAGE.TAG_REFERENCES, which reports the
+    folded name. Seeding the lowercase key would make every join miss silently."""
+    for t in cat["tags"]:
+        assert f"'{C.snowflake_name(t)}'" in seed
+        # ... and the canonical lowercase key is carried alongside it.
+        assert f"'{t['name']}'" in seed
 
 
 # ---------------------------------------------------------------------------

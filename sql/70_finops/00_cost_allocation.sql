@@ -48,31 +48,36 @@ USE SCHEMA REPORTING;
 -- Warehouse spend, attributed by warehouse tags.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW VW_WAREHOUSE_COST_ALLOCATION
-COMMENT = 'Daily warehouse credits and cost, attributed via the warehouse''s own tags.'
+COMMENT = 'Daily warehouse credits and cost, attributed via the warehouse''s own allocation-hierarchy tags.'
 AS
 SELECT
     DATE_TRUNC('DAY', m.START_TIME)::DATE          AS USAGE_DATE,
     m.WAREHOUSE_NAME,
-    p.BUSINESS_UNIT,
+    p.OPERATING_COMPANY,
+    p.DEPARTMENT,
     p.DOMAIN,
+    p.TEAM,
+    p.APPLICATION,
+    p.WORKLOAD_TYPE,
     p.COST_CENTER,
     p.ENVIRONMENT,
-    p.CRITICALITY,
     SUM(m.CREDITS_USED_COMPUTE)                    AS CREDITS_COMPUTE,
     SUM(m.CREDITS_USED_CLOUD_SERVICES)             AS CREDITS_CLOUD_SERVICES,
     SUM(m.CREDITS_USED)                            AS CREDITS_TOTAL,
     SUM(m.CREDITS_USED) * MAX(r.CREDIT_PRICE)      AS COST,
     MAX(r.CURRENCY)                                AS CURRENCY,
-    -- Everything the business is charged for must name a payer. This flag is
-    -- what makes the gap visible instead of absorbing it into a platform budget.
-    (p.COST_CENTER IS NULL)                        AS IS_UNALLOCATED
+    -- Everything the business is charged for must name a payer. Operating
+    -- company and department are the two levels every cost report rolls up to,
+    -- so a gap in either makes the row unallocatable regardless of what else
+    -- is tagged.
+    (p.OPERATING_COMPANY IS NULL OR p.DEPARTMENT IS NULL) AS IS_UNALLOCATED
 FROM SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY m
 LEFT JOIN VW_OBJECT_TAG_PROFILE p
        ON p.OBJECT_TYPE = 'WAREHOUSE' AND p.OBJECT_NAME = m.WAREHOUSE_NAME
 LEFT JOIN GOVERNANCE.CONTROL.RATE_CARD r
        ON m.START_TIME::DATE BETWEEN r.EFFECTIVE_FROM
                                  AND COALESCE(r.EFFECTIVE_TO, '9999-12-31'::DATE)
-GROUP BY 1, 2, 3, 4, 5, 6, 7;
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9;
 
 -- -----------------------------------------------------------------------------
 -- Per-query attribution: splits a shared warehouse across the consuming tags.
@@ -95,8 +100,10 @@ SELECT
     -- Attribution follows the CONSUMING role, not the queried object: reading a
     -- shared reference table must not bill the team that publishes it, or the
     -- mesh penalises exactly the behaviour it needs to encourage.
-    COALESCE(rp.BUSINESS_UNIT, wp.BUSINESS_UNIT)   AS BUSINESS_UNIT,
-    COALESCE(rp.COST_CENTER,   wp.COST_CENTER)     AS COST_CENTER,
+    COALESCE(rp.OPERATING_COMPANY, wp.OPERATING_COMPANY) AS OPERATING_COMPANY,
+    COALESCE(rp.DEPARTMENT,        wp.DEPARTMENT)        AS DEPARTMENT,
+    COALESCE(rp.COST_CENTER,       wp.COST_CENTER)       AS COST_CENTER,
+    wp.WORKLOAD_TYPE,
     wp.ENVIRONMENT,
     COUNT(*)                                       AS QUERY_COUNT,
     SUM(qa.CREDITS_ATTRIBUTED_COMPUTE)             AS CREDITS_ATTRIBUTED,
@@ -104,7 +111,7 @@ SELECT
     -- Falling back to the warehouse means the consuming role is untagged:
     -- accurate at warehouse level, imprecise below it. Surfaced rather than
     -- hidden, because it is the specific gap a steward can close.
-    BOOLOR_AGG(rp.COST_CENTER IS NULL)             AS FELL_BACK_TO_WAREHOUSE
+    BOOLOR_AGG(rp.OPERATING_COMPANY IS NULL)       AS FELL_BACK_TO_WAREHOUSE
 FROM SNOWFLAKE.ACCOUNT_USAGE.QUERY_ATTRIBUTION_HISTORY qa
 LEFT JOIN VW_OBJECT_TAG_PROFILE rp
        ON rp.OBJECT_TYPE = 'ROLE' AND rp.OBJECT_NAME = qa.ROLE_NAME
@@ -113,7 +120,7 @@ LEFT JOIN VW_OBJECT_TAG_PROFILE wp
 LEFT JOIN GOVERNANCE.CONTROL.RATE_CARD rc
        ON qa.START_TIME::DATE BETWEEN rc.EFFECTIVE_FROM
                                   AND COALESCE(rc.EFFECTIVE_TO, '9999-12-31'::DATE)
-GROUP BY 1, 2, 3, 4, 5, 6, 7;
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9;
 
 -- -----------------------------------------------------------------------------
 -- Storage, attributed through database and schema tags.
@@ -125,7 +132,8 @@ SELECT
     CURRENT_DATE()                                  AS AS_OF_DATE,
     s.TABLE_CATALOG                                 AS OBJECT_DATABASE,
     s.TABLE_SCHEMA                                  AS OBJECT_SCHEMA,
-    p.BUSINESS_UNIT,
+    p.OPERATING_COMPANY,
+    p.DEPARTMENT,
     p.DOMAIN,
     p.COST_CENTER,
     p.ENVIRONMENT,
@@ -149,7 +157,7 @@ LEFT JOIN GOVERNANCE.CONTROL.RATE_CARD r
        ON CURRENT_DATE() BETWEEN r.EFFECTIVE_FROM
                              AND COALESCE(r.EFFECTIVE_TO, '9999-12-31'::DATE)
 WHERE s.DELETED = FALSE
-GROUP BY 1, 2, 3, 4, 5, 6, 7, 8;
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, 9;
 
 -- -----------------------------------------------------------------------------
 -- The monthly chargeback statement.
@@ -159,21 +167,22 @@ COMMENT = 'Monthly compute + storage by cost centre. The number that posts to th
 AS
 WITH COMPUTE AS (
     SELECT DATE_TRUNC('MONTH', USAGE_DATE)::DATE AS BILLING_MONTH,
-           BUSINESS_UNIT, DOMAIN, COST_CENTER, ENVIRONMENT,
+           OPERATING_COMPANY, DEPARTMENT, DOMAIN, COST_CENTER, ENVIRONMENT,
            SUM(CREDITS_TOTAL) AS CREDITS, SUM(COST) AS COMPUTE_COST
     FROM VW_WAREHOUSE_COST_ALLOCATION
-    GROUP BY 1, 2, 3, 4, 5
+    GROUP BY 1, 2, 3, 4, 5, 6
 ),
 STORAGE AS (
     SELECT DATE_TRUNC('MONTH', AS_OF_DATE)::DATE AS BILLING_MONTH,
-           BUSINESS_UNIT, DOMAIN, COST_CENTER, ENVIRONMENT,
+           OPERATING_COMPANY, DEPARTMENT, DOMAIN, COST_CENTER, ENVIRONMENT,
            SUM(MONTHLY_COST) AS STORAGE_COST
     FROM VW_STORAGE_COST_ALLOCATION
-    GROUP BY 1, 2, 3, 4, 5
+    GROUP BY 1, 2, 3, 4, 5, 6
 )
 SELECT
     COALESCE(c.BILLING_MONTH, s.BILLING_MONTH)   AS BILLING_MONTH,
-    COALESCE(c.BUSINESS_UNIT, s.BUSINESS_UNIT, '<UNALLOCATED>') AS BUSINESS_UNIT,
+    COALESCE(c.OPERATING_COMPANY, s.OPERATING_COMPANY, '<UNALLOCATED>') AS OPERATING_COMPANY,
+    COALESCE(c.DEPARTMENT,    s.DEPARTMENT,    '<UNALLOCATED>') AS DEPARTMENT,
     COALESCE(c.DOMAIN,        s.DOMAIN,        '<UNALLOCATED>') AS DOMAIN,
     COALESCE(c.COST_CENTER,   s.COST_CENTER,   '<UNALLOCATED>') AS COST_CENTER,
     COALESCE(c.ENVIRONMENT,   s.ENVIRONMENT,   '<UNTAGGED>')    AS ENVIRONMENT,
@@ -202,10 +211,14 @@ SELECT
     WAREHOUSE_NAME                     AS RESOURCE_NAME,
     CREDITS_TOTAL,
     COST,
+    -- Names the specific missing keys, so remediation is a work item rather
+    -- than an investigation.
     ARRAY_COMPACT(ARRAY_CONSTRUCT(
-        IFF(BUSINESS_UNIT IS NULL, 'BUSINESS_UNIT', NULL),
-        IFF(COST_CENTER   IS NULL, 'COST_CENTER',   NULL),
-        IFF(ENVIRONMENT   IS NULL, 'ENVIRONMENT',   NULL)
+        IFF(OPERATING_COMPANY IS NULL, 'operating_company', NULL),
+        IFF(DEPARTMENT        IS NULL, 'department',        NULL),
+        IFF(COST_CENTER       IS NULL, 'cost_center',       NULL),
+        IFF(ENVIRONMENT       IS NULL, 'environment',       NULL),
+        IFF(WORKLOAD_TYPE     IS NULL, 'workload_type',     NULL)
     ))                                 AS MISSING_TAGS
 FROM VW_WAREHOUSE_COST_ALLOCATION
 WHERE IS_UNALLOCATED;

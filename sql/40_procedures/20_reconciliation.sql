@@ -24,7 +24,7 @@ USE SCHEMA AUTOMATION;
 -- for us.
 --
 -- The policy signature must bind to a real column. A table declaring
--- ROW_ACCESS_REQUIRED = YES without a BUSINESS_UNIT column cannot be protected
+-- ROW_ACCESS_REQUIRED = YES without an OPERATING_COMPANY column cannot be protected
 -- by the standard policy, and is reported rather than silently skipped - a
 -- silently skipped table is an unprotected table with a compliant-looking tag,
 -- which is the worst of both worlds.
@@ -47,17 +47,17 @@ DECLARE
     V_SCHEMA    STRING;
     V_NAME      STRING;
     V_TYPE      STRING;
-    V_BU_COLUMN STRING;
+    V_SCOPE_COLUMN STRING;
     C_TARGETS CURSOR FOR
         SELECT p.OBJECT_DATABASE, p.OBJECT_SCHEMA, p.OBJECT_NAME, p.OBJECT_TYPE,
-               col.COLUMN_NAME AS BU_COLUMN
+               col.COLUMN_NAME AS SCOPE_COLUMN
         FROM GOVERNANCE.REPORTING.VW_OBJECT_TAG_PROFILE p
         -- Does the table expose the dimension the policy needs?
         LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.COLUMNS col
           ON  col.TABLE_CATALOG = p.OBJECT_DATABASE
           AND col.TABLE_SCHEMA  = p.OBJECT_SCHEMA
           AND col.TABLE_NAME    = p.OBJECT_NAME
-          AND col.COLUMN_NAME   = 'BUSINESS_UNIT'
+          AND col.COLUMN_NAME   = 'OPERATING_COMPANY'
           AND col.DELETED IS NULL
         -- Already protected?
         LEFT JOIN SNOWFLAKE.ACCOUNT_USAGE.POLICY_REFERENCES pr
@@ -75,17 +75,17 @@ BEGIN
         V_SCHEMA    := rec.OBJECT_SCHEMA;
         V_NAME      := rec.OBJECT_NAME;
         V_TYPE      := rec.OBJECT_TYPE;
-        V_BU_COLUMN := rec.BU_COLUMN;
+        V_SCOPE_COLUMN := rec.SCOPE_COLUMN;
         V_FQN       := V_DB || '.' || V_SCHEMA || '.' || V_NAME;
 
-        IF (V_BU_COLUMN IS NULL) THEN
+        IF (V_SCOPE_COLUMN IS NULL) THEN
             V_SKIPPED := V_SKIPPED + 1;
             INSERT INTO GOVERNANCE.CONTROL.COMPLIANCE_FINDING
                 (SCAN_ID, SCAN_AT, OBJECT_DATABASE, OBJECT_SCHEMA, OBJECT_NAME,
                  OBJECT_TYPE, TAG_NAME, FINDING_TYPE, SEVERITY, DETAIL)
             SELECT 'RAP-RECONCILE', CURRENT_TIMESTAMP(), :V_DB, :V_SCHEMA, :V_NAME,
                    :V_TYPE, 'ROW_ACCESS_REQUIRED', 'POLICY_DRIFT', 'CRITICAL',
-                   'Declares ROW_ACCESS_REQUIRED = YES but has no BUSINESS_UNIT ' ||
+                   'Declares ROW_ACCESS_REQUIRED = YES but has no OPERATING_COMPANY ' ||
                    'column, so the standard row access policy cannot bind. The ' ||
                    'table is UNPROTECTED. Either add the dimension column or ' ||
                    'register a bespoke policy in CONTROL.TAG_POLICY_BINDING.';
@@ -93,8 +93,8 @@ BEGIN
         END IF;
 
         V_STMT := 'ALTER ' || REPLACE(V_TYPE, '_', ' ') || ' ' || V_FQN ||
-                  ' ADD ROW ACCESS POLICY GOVERNANCE.POLICIES.RAP_BUSINESS_UNIT_SCOPE' ||
-                  ' ON (' || V_BU_COLUMN || ')';
+                  ' ADD ROW ACCESS POLICY GOVERNANCE.POLICIES.RAP_OPERATING_COMPANY_SCOPE' ||
+                  ' ON (' || V_SCOPE_COLUMN || ')';
 
         IF (NOT P_DRY_RUN) THEN
             EXECUTE IMMEDIATE :V_STMT;
@@ -102,7 +102,7 @@ BEGIN
                 (ACTION, OBJECT_DATABASE, OBJECT_SCHEMA, OBJECT_NAME, OBJECT_TYPE,
                  TAG_NAME, NEW_VALUE, CHANGE_REASON, SOURCE)
             SELECT 'SET', :V_DB, :V_SCHEMA, :V_NAME, :V_TYPE,
-                   'ROW_ACCESS_REQUIRED', 'RAP_BUSINESS_UNIT_SCOPE',
+                   'ROW_ACCESS_REQUIRED', 'RAP_OPERATING_COMPANY_SCOPE',
                    'Row access policy applied by tag reconciliation.', 'REMEDIATION';
         END IF;
         V_APPLIED := V_APPLIED + 1;
@@ -127,7 +127,8 @@ $$;
 --
 -- So the framework treats classifier output as a PROPOSAL:
 --   * classifier says IDENTIFIER/QUASI_IDENTIFIER, no human decision yet
---         -> set PII = YES automatically, state AUTO_APPLIED, notify the steward
+--         -> set data_classification_regulatory = PII automatically,
+--            state AUTO_APPLIED, notify the steward
 --   * classifier and the enterprise tag agree      -> AGREED, no action
 --   * they disagree and a human set the tag        -> HUMAN_OVERRIDE, needs a
 --         recorded reason, and is surfaced for review rather than overwritten
@@ -139,7 +140,7 @@ CREATE OR REPLACE PROCEDURE SP_RECONCILE_CLASSIFICATION(P_AUTO_APPLY BOOLEAN)
 RETURNS STRING
 LANGUAGE SQL
 EXECUTE AS OWNER
-COMMENT = 'Reconciles Snowflake auto-classification output with the enterprise PII tag.'
+COMMENT = 'Reconciles Snowflake auto-classification output with the enterprise regulatory classification tag.'
 AS
 $$
 DECLARE
@@ -150,12 +151,14 @@ DECLARE
     V_NAME     STRING;
     V_COLUMN   STRING;
     V_FQN      STRING;
+    V_PROPOSED STRING;
     C_PROPOSED CURSOR FOR
-        SELECT OBJECT_DATABASE, OBJECT_SCHEMA, OBJECT_NAME, COLUMN_NAME
+        SELECT OBJECT_DATABASE, OBJECT_SCHEMA, OBJECT_NAME, COLUMN_NAME,
+               PRIVACY_CATEGORY
         FROM GOVERNANCE.CONTROL.CLASSIFICATION_RECONCILIATION
         WHERE RECONCILIATION_STATE = 'UNREVIEWED'
           AND PRIVACY_CATEGORY IN ('IDENTIFIER', 'QUASI_IDENTIFIER', 'SENSITIVE')
-          AND COALESCE(ENTERPRISE_PII, 'UNSET') <> 'YES';
+          AND COALESCE(ENTERPRISE_REGULATORY_CATEGORY, 'NONE') = 'NONE';
 BEGIN
     -- 1. Refresh the reconciliation table from the classifier's system tags.
     MERGE INTO GOVERNANCE.CONTROL.CLASSIFICATION_RECONCILIATION t
@@ -164,14 +167,14 @@ BEGIN
             c.OBJECT_DATABASE, c.OBJECT_SCHEMA, c.OBJECT_NAME, c.COLUMN_NAME,
             MAX(IFF(c.TAG_NAME = 'SEMANTIC_CATEGORY', c.TAG_VALUE, NULL)) AS SEMANTIC_CATEGORY,
             MAX(IFF(c.TAG_NAME = 'PRIVACY_CATEGORY',  c.TAG_VALUE, NULL)) AS PRIVACY_CATEGORY,
-            MAX(e.EFFECTIVE_VALUE)                                        AS ENTERPRISE_PII
+            MAX(e.EFFECTIVE_VALUE)                          AS ENTERPRISE_REGULATORY_CATEGORY
         FROM SNOWFLAKE.ACCOUNT_USAGE.TAG_REFERENCES c
         LEFT JOIN GOVERNANCE.REPORTING.VW_EFFECTIVE_TAG e
           ON  e.OBJECT_DATABASE = c.OBJECT_DATABASE
           AND e.OBJECT_SCHEMA   = c.OBJECT_SCHEMA
           AND e.OBJECT_NAME     = c.OBJECT_NAME
           AND e.COLUMN_NAME     = c.COLUMN_NAME
-          AND e.TAG_NAME        = 'PII'
+          AND e.TAG_NAME        = 'DATA_CLASSIFICATION_REGULATORY'
         WHERE c.TAG_DATABASE = 'SNOWFLAKE'
           AND c.TAG_SCHEMA   = 'CORE'
           AND c.TAG_NAME IN ('SEMANTIC_CATEGORY', 'PRIVACY_CATEGORY')
@@ -186,21 +189,24 @@ BEGIN
     WHEN MATCHED THEN UPDATE SET
         t.SEMANTIC_CATEGORY = s.SEMANTIC_CATEGORY,
         t.PRIVACY_CATEGORY  = s.PRIVACY_CATEGORY,
-        t.ENTERPRISE_PII    = s.ENTERPRISE_PII,
+        t.ENTERPRISE_REGULATORY_CATEGORY = s.ENTERPRISE_REGULATORY_CATEGORY,
         t.LAST_CLASSIFIED_AT = CURRENT_TIMESTAMP(),
         -- A human decision is never demoted back to UNREVIEWED by a re-scan.
         t.RECONCILIATION_STATE = CASE
             WHEN t.RECONCILIATION_STATE = 'HUMAN_OVERRIDE' THEN 'HUMAN_OVERRIDE'
-            WHEN s.ENTERPRISE_PII = 'YES' THEN 'AGREED'
+            WHEN COALESCE(s.ENTERPRISE_REGULATORY_CATEGORY, 'NONE') <> 'NONE'
+                THEN 'AGREED'
             ELSE t.RECONCILIATION_STATE
         END
     WHEN NOT MATCHED THEN INSERT
         (OBJECT_DATABASE, OBJECT_SCHEMA, OBJECT_NAME, COLUMN_NAME,
-         SEMANTIC_CATEGORY, PRIVACY_CATEGORY, ENTERPRISE_PII, RECONCILIATION_STATE)
+         SEMANTIC_CATEGORY, PRIVACY_CATEGORY, ENTERPRISE_REGULATORY_CATEGORY,
+         RECONCILIATION_STATE)
     VALUES
         (s.OBJECT_DATABASE, s.OBJECT_SCHEMA, s.OBJECT_NAME, s.COLUMN_NAME,
-         s.SEMANTIC_CATEGORY, s.PRIVACY_CATEGORY, s.ENTERPRISE_PII,
-         IFF(s.ENTERPRISE_PII = 'YES', 'AGREED', 'UNREVIEWED'));
+         s.SEMANTIC_CATEGORY, s.PRIVACY_CATEGORY, s.ENTERPRISE_REGULATORY_CATEGORY,
+         IFF(COALESCE(s.ENTERPRISE_REGULATORY_CATEGORY, 'NONE') <> 'NONE',
+             'AGREED', 'UNREVIEWED'));
 
     -- 2. Apply the classifier's proposal where no human has ruled.
     IF (P_AUTO_APPLY) THEN
@@ -211,7 +217,14 @@ BEGIN
             V_COLUMN := rec.COLUMN_NAME;
             V_FQN    := V_DB || '.' || V_SCHEMA || '.' || V_NAME;
 
-            CALL SP_APPLY_TAG('COLUMN', :V_FQN, :V_COLUMN, 'PII', 'YES',
+            -- The classifier distinguishes SENSITIVE from ordinary identifiers,
+            -- so the proposal is mapped to the matching enterprise category
+            -- rather than flattened to a single flag. A steward can always
+            -- escalate further; the job never proposes more than the evidence.
+            V_PROPOSED := IFF(rec.PRIVACY_CATEGORY = 'SENSITIVE', 'SPII', 'PII');
+
+            CALL SP_APPLY_TAG('COLUMN', :V_FQN, :V_COLUMN,
+                'DATA_CLASSIFICATION_REGULATORY', :V_PROPOSED,
                 'Auto-applied from Snowflake classification (privacy category).',
                 NULL, 'AUTO_CLASSIFY');
 
@@ -220,11 +233,12 @@ BEGIN
             -- rejection message instead of raising, so a failed apply would
             -- otherwise be recorded as AUTO_APPLIED and the column would sit
             -- unmasked behind a reconciliation row claiming it was handled.
-            IF (SYSTEM$GET_TAG('GOVERNANCE.TAGS.PII',
-                               :V_FQN || '.' || :V_COLUMN, 'COLUMN') = 'YES') THEN
+            IF (SYSTEM$GET_TAG('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY',
+                               :V_FQN || '.' || :V_COLUMN, 'COLUMN') = :V_PROPOSED) THEN
                 V_APPLIED := V_APPLIED + 1;
                 UPDATE GOVERNANCE.CONTROL.CLASSIFICATION_RECONCILIATION
-                   SET RECONCILIATION_STATE = 'AUTO_APPLIED', ENTERPRISE_PII = 'YES'
+                   SET RECONCILIATION_STATE = 'AUTO_APPLIED',
+                       ENTERPRISE_REGULATORY_CATEGORY = :V_PROPOSED
                  WHERE OBJECT_DATABASE = :V_DB
                    AND OBJECT_SCHEMA   = :V_SCHEMA
                    AND OBJECT_NAME     = :V_NAME
@@ -237,11 +251,11 @@ BEGIN
     SELECT COUNT(*) INTO :V_CONFLICT
       FROM GOVERNANCE.CONTROL.CLASSIFICATION_RECONCILIATION
      WHERE PRIVACY_CATEGORY IN ('IDENTIFIER', 'QUASI_IDENTIFIER', 'SENSITIVE')
-       AND ENTERPRISE_PII = 'NO'
+       AND COALESCE(ENTERPRISE_REGULATORY_CATEGORY, 'NONE') = 'NONE'
        AND RECONCILIATION_STATE = 'HUMAN_OVERRIDE'
        AND OVERRIDE_REASON IS NULL;
 
-    RETURN V_APPLIED || ' columns auto-tagged as PII; ' || V_CONFLICT ||
+    RETURN V_APPLIED || ' columns auto-classified; ' || V_CONFLICT ||
            ' human overrides lack a recorded reason and need steward review.';
 EXCEPTION
     WHEN OTHER THEN

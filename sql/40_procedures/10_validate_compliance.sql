@@ -27,7 +27,7 @@ USE SCHEMA REPORTING;
 -- Columns that carry column-level obligations.
 -- -----------------------------------------------------------------------------
 CREATE OR REPLACE VIEW VW_COLUMN_IN_SCOPE
-COMMENT = 'Columns subject to column-level mandatory tagging: those in tables flagged as regulated or sensitive.'
+COMMENT = 'Columns subject to column-level mandatory tagging: those in tables flagged as regulated or RESTRICTED.'
 AS
 SELECT c.OBJECT_DATABASE, c.OBJECT_SCHEMA, c.OBJECT_NAME, c.COLUMN_NAME
 FROM VW_OBJECT_INVENTORY c
@@ -37,9 +37,8 @@ JOIN VW_OBJECT_TAG_PROFILE t
   AND t.OBJECT_NAME     = c.OBJECT_NAME
   AND t.COLUMN_NAME IS NULL
 WHERE c.OBJECT_TYPE = 'COLUMN'
-  AND (   t.PII = 'YES'
-       OR t.DATA_CLASSIFICATION IN ('RESTRICTED', 'HIGHLY_RESTRICTED')
-       OR COALESCE(t.REGULATION, 'NONE') <> 'NONE');
+  AND (   t.IS_REGULATED
+       OR t.DATA_CLASSIFICATION_ENTERPRISE = 'RESTRICTED');
 
 USE SCHEMA AUTOMATION;
 
@@ -294,6 +293,48 @@ BEGIN
     WHERE t.DELETED IS NULL
       AND NOT (t.TAG_DATABASE = 'GOVERNANCE' AND t.TAG_SCHEMA = 'TAGS')
       AND t.TAG_DATABASE <> 'SNOWFLAKE';   -- SNOWFLAKE.CORE system tags are expected
+
+    -- =====================================================================
+    -- CHECK 7: contradictions - tags that are present and mutually impossible
+    -- =====================================================================
+    -- Every other check looks for something MISSING. This one looks for two
+    -- values that cannot both be true, which is the more dangerous state: an
+    -- object tagged PCI and PUBLIC scores as fully covered on every coverage
+    -- metric while the masking policy reads the enterprise classification and
+    -- lets the data through in clear.
+    INSERT INTO GOVERNANCE.CONTROL.COMPLIANCE_FINDING
+        (SCAN_ID, SCAN_AT, OBJECT_DATABASE, OBJECT_SCHEMA, OBJECT_NAME,
+         OBJECT_TYPE, COLUMN_NAME, TAG_NAME, RULE_ID, FINDING_TYPE, SEVERITY,
+         DETAIL, OBSERVED_VALUE, DOMAIN, DATA_OWNER, DATA_STEWARD)
+    SELECT
+        :V_SCAN_ID, :V_SCAN_AT,
+        a.OBJECT_DATABASE, a.OBJECT_SCHEMA, a.OBJECT_NAME, a.OBJECT_TYPE,
+        a.COLUMN_NAME, r.THEN_TAG, r.RULE_ID, 'CONTRADICTORY_TAGS', r.SEVERITY,
+        r.RULE_ID || ': ' || r.DESCRIPTION ||
+            ' Observed ' || r.IF_TAG || ' = "' || a.EFFECTIVE_VALUE ||
+            '" together with ' || r.THEN_TAG || ' = "' || b.EFFECTIVE_VALUE || '".',
+        r.THEN_TAG || '=' || b.EFFECTIVE_VALUE,
+        p.DOMAIN, p.DATA_OWNER, p.DATA_STEWARD
+    FROM GOVERNANCE.CONTROL.TAG_CONTRADICTION_RULE r
+    JOIN GOVERNANCE.REPORTING.VW_EFFECTIVE_TAG a
+      ON  a.TAG_NAME = r.IF_TAG
+      AND ARRAY_CONTAINS(a.EFFECTIVE_VALUE::VARIANT, r.IF_VALUES)
+    JOIN GOVERNANCE.REPORTING.VW_EFFECTIVE_TAG b
+      ON  EQUAL_NULL(b.OBJECT_DATABASE, a.OBJECT_DATABASE)
+      AND EQUAL_NULL(b.OBJECT_SCHEMA,   a.OBJECT_SCHEMA)
+      AND b.OBJECT_NAME = a.OBJECT_NAME
+      AND EQUAL_NULL(b.COLUMN_NAME, a.COLUMN_NAME)
+      AND b.OBJECT_TYPE = a.OBJECT_TYPE
+      AND b.TAG_NAME    = r.THEN_TAG
+      AND ARRAY_CONTAINS(b.EFFECTIVE_VALUE::VARIANT, r.FORBIDDEN_VALUES)
+    LEFT JOIN GOVERNANCE.REPORTING.VW_OBJECT_TAG_PROFILE p
+      ON  EQUAL_NULL(p.OBJECT_DATABASE, a.OBJECT_DATABASE)
+      AND EQUAL_NULL(p.OBJECT_SCHEMA,   a.OBJECT_SCHEMA)
+      AND p.OBJECT_NAME = a.OBJECT_NAME
+      AND EQUAL_NULL(p.COLUMN_NAME, a.COLUMN_NAME)
+      AND p.OBJECT_TYPE = a.OBJECT_TYPE
+    WHERE r.IS_ACTIVE
+      AND (:P_SCOPE_DATABASE IS NULL OR a.OBJECT_DATABASE = :P_SCOPE_DATABASE);
 
     -- =====================================================================
     -- Suppress findings already covered by a live, approved exception.

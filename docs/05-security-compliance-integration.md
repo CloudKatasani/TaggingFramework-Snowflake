@@ -7,35 +7,36 @@ How tags become enforcement rather than description.
 ```
    ┌──────────────────────────────────────────────────────────────────────┐
    │                          DECLARATION                                 │
-   │  DATA_CLASSIFICATION · PII · PHI · PCI · SENSITIVE_DATA              │
-   │  MASKING_REQUIRED · ROW_ACCESS_REQUIRED · SHARING_SCOPE              │
+   │  data_classification_enterprise · data_classification_regulatory     │
+   │  masking_required · row_access_required · sharing_scope              │
    └───────────────┬──────────────────────────────────┬───────────────────┘
                    │                                  │
         TAG ATTACHMENT (immediate)          RECONCILIATION (≤15 min)
                    │                                  │
                    ▼                                  ▼
    ┌───────────────────────────────┐   ┌──────────────────────────────────┐
-   │  ALTER TAG DATA_CLASSIFICATION│   │  SP_APPLY_ROW_ACCESS_POLICIES    │
-   │  SET MASKING POLICY MP_...    │   │  reads ROW_ACCESS_REQUIRED,      │
-   │                               │   │  issues ALTER TABLE ADD ROW      │
-   │  Propagates through lineage   │   │  ACCESS POLICY                   │
-   │  to every column of matching  │   │                                  │
-   │  data type, now and future    │   │  Needed because Snowflake has no │
-   └───────────────┬───────────────┘   │  tag attachment for row policies │
-                   │                   └──────────────┬───────────────────┘
+   │ ALTER TAG                     │   │ SP_APPLY_ROW_ACCESS_POLICIES     │
+   │   ..._ENTERPRISE              │   │   reads row_access_required,     │
+   │   SET MASKING POLICY MP_...   │   │   issues ALTER TABLE ADD ROW     │
+   │                               │   │   ACCESS POLICY                  │
+   │ Propagates through lineage to │   │                                  │
+   │ every column of a matching    │   │ Needed because Snowflake has no  │
+   │ data type, now and in future  │   │ tag attachment for row policies  │
+   └───────────────┬───────────────┘   └──────────────┬───────────────────┘
+                   │                                  │
                    ▼                                  ▼
    ┌──────────────────────────────────────────────────────────────────────┐
    │                          ENFORCEMENT                                 │
    │  MP_ENTERPRISE_{STRING,NUMBER,DATE,TIMESTAMP_NTZ,VARIANT}            │
-   │  RAP_BUSINESS_UNIT_SCOPE · RAP_DOMAIN_SCOPE · RAP_DATA_RESIDENCY     │
-   │  AGG_HIGHLY_RESTRICTED · PROJ_PCI_NO_OUTPUT                          │
+   │  RAP_OPERATING_COMPANY_SCOPE · RAP_DOMAIN_SCOPE                      │
+   │  RAP_DATA_RESIDENCY · AGG_RESTRICTED · PROJ_PCI_NO_OUTPUT            │
    └───────────────┬──────────────────────────────────────────────────────┘
                    │
                    ▼
    ┌──────────────────────────────────────────────────────────────────────┐
    │                          ASSURANCE                                   │
    │  SP_DETECT_POLICY_DRIFT (hourly) · VW_COMPLIANCE_EVIDENCE            │
-   │  ALERT_POLICY_DRIFT · TAG_CHANGE_LOG                                 │
+   │  Contradiction rules (XR-001…) · ALERT_POLICY_DRIFT · TAG_CHANGE_LOG │
    │  Declared ≠ enforced is itself a CRITICAL finding                    │
    └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -48,14 +49,14 @@ was enforced and quietly stopped being enforced, while every report stayed green
 
 ### One tag carries the attachments
 
-`DATA_CLASSIFICATION` — and only `DATA_CLASSIFICATION` — has masking policies
-attached to it. The policy body branches on `PII`, `PHI`, `PCI` and
-`SENSITIVE_DATA` via `SYSTEM$GET_TAG_ON_CURRENT_COLUMN`.
+`data_classification_enterprise` — and only that tag — has masking policies
+attached to it. The policy body branches on `data_classification_regulatory` via
+`SYSTEM$GET_TAG_ON_CURRENT_COLUMN`.
 
 This is the most important structural decision in the security model, and the
 reasoning is worth being explicit about. Snowflake allows one masking policy per
-data type per tag, and a column can only ever carry one masking policy. If `PII`,
-`PHI`, `PCI` and `DATA_CLASSIFICATION` each had their own `STRING` policy, then a
+data type per tag, and a column can only ever carry one masking policy. If `data_classification_regulatory` (PII),
+`data_classification_regulatory` (PHI), `data_classification_regulatory` (PCI) and `data_classification_enterprise` each had their own `STRING` policy, then a
 column tagged both `PII = YES` and `DATA_CLASSIFICATION = RESTRICTED` would have
 two candidate policies, and which one applied would depend on **tag-lineage
 proximity rather than on which control is stronger**. That is an unacceptable
@@ -65,41 +66,66 @@ what rule" must not depend on the order somebody happened to tag things.
 Binding a single tag gives:
 
 - deterministic resolution, always;
-- five policies instead of fifteen;
-- a new privacy signal is a change to a policy body, not to the attachment graph;
-- `DATA_CLASSIFICATION` is mandatory on every table and view, so lineage
-  propagation reaches every column of a matching type in the estate.
+- five policies instead of ten;
+- a new regulatory category is a change to a policy body, not to the attachment
+  graph;
+- `data_classification_enterprise` is mandatory on every table and view, so
+  lineage propagation reaches every column of a matching type in the estate.
 
 `validate_catalog.py` enforces the invariant: more than one tag carrying masking
 attachments fails the build, and any tag the policy body reads must be at least
-`RECOMMENDED` on `COLUMN` — otherwise the branch silently never fires.
+`RECOMMENDED` on `COLUMN` — otherwise the branch silently never fires. That
+second rule has already caught a real gap during development.
 
 ### Masking behaviour
 
-| Signal | Privileged role | Analyst (`PSEUDONYM_ANALYST`) | Everyone else |
+The regulatory categories are **ordered**, so the branches are evaluated
+most-stringent-first and the first match wins. A column that is both PII and PCI
+carries `PCI`, and PCI handling is a superset of what the privacy obligation
+requires on that column.
+
+| `data_classification_regulatory` | Privileged role | Analyst (`PSEUDONYM_ANALYST`) | Everyone else |
 |---|---|---|---|
-| `PCI = YES` | clear | last 4 digits | last 4 digits |
-| `PHI = YES` | clear | `PHI#<sha256>` | `***PHI REDACTED***` |
-| `SENSITIVE_DATA = YES` | clear (two roles required) | redacted | `***SPECIAL CATEGORY***` |
-| `PII = YES` | clear | `PID#<sha256[:16]>` | `***MASKED***` |
-| `HIGHLY_RESTRICTED` | clear | redacted | `***HIGHLY RESTRICTED***` |
-| `RESTRICTED` | clear | redacted | `***RESTRICTED***` |
+| `PCI` | clear (`PCI_UNMASKED`) | last 4 digits | last 4 digits |
+| `PHI` | clear (`PHI_UNMASKED`) | `PHI#<sha256>` | `***PHI REDACTED***` |
+| `SPII` | clear (`SPII_UNMASKED`) | redacted | `***SPII REDACTED***` |
+| `PII` | clear (`PII_UNMASKED`) | `PID#<sha256[:16]>` | `***MASKED***` |
+| `NONE` | falls through to the enterprise classification below | | |
+
+| `data_classification_enterprise` | Privileged role | Everyone else |
+|---|---|---|
+| `RESTRICTED` | clear (`RESTRICTED_DATA_READER`) | `***RESTRICTED***` |
+| `CONFIDENTIAL` / `INTERNAL` / `PUBLIC` / `NONE` | clear | clear |
 
 Three choices in there that are not cosmetic:
 
 **Pseudonymisation, not redaction, for analysts.** `PID#<hash>` is deterministic,
 so joins and cohort analysis still work while the value is no longer identifying.
 A control that makes legitimate analysis impossible gets routed around — someone
-extracts to a spreadsheet, and the data leaves the platform entirely. This is the
+extracts to a spreadsheet, and the data leaves the platform entirely. That is the
 difference between a control that holds and one that is technically present.
 
-**Numbers mask to `NULL`, never to `0`.** A masked `0` is indistinguishable from a
-real `0` and corrupts every `SUM` and `AVG` built on the column. `NULL` propagates
-honestly through aggregates.
+**Numbers mask to `NULL`, never to `0`.** A masked `0` is indistinguishable from
+a real `0` and corrupts every `SUM` and `AVG` built on the column. `NULL`
+propagates honestly through aggregates.
 
 **Dates generalise rather than null.** `DATE_TRUNC('YEAR', dob)` remains
 analytically useful and is no longer a HIPAA Safe Harbor identifier for the great
 majority of the population.
+
+### `NONE` is not the same as absent
+
+The enterprise vocabulary includes `NONE`, and the distinction from an *absent*
+tag is deliberate and load-bearing:
+
+| State | Meaning | Policy behaviour |
+|---|---|---|
+| `NONE` | assessed; no classification applies | data returned in clear |
+| absent / unreadable | nobody has assessed it | **masked as `RESTRICTED`** |
+
+An explicit `NONE` is a decision someone made and is accountable for. A missing
+tag is an absence of decision, and the framework refuses to treat the two the
+same way.
 
 ### Fail-closed
 
@@ -147,13 +173,13 @@ between two task runs is unprotected for up to 15 minutes. Mitigations:
    anything shipped through the pipeline is never in the window;
 3. the window is documented rather than discovered during an assessment.
 
-A table declaring `ROW_ACCESS_REQUIRED = YES` without the `BUSINESS_UNIT` column
+A table declaring `ROW_ACCESS_REQUIRED = YES` without the `operating_company` column
 the policy binds to is **reported as a CRITICAL finding, not skipped**. A silently
 skipped table is an unprotected table with a compliant-looking tag — the worst
 available outcome.
 
 Entitlements live in one table, `CONTROL.ROW_ACCESS_ENTITLEMENT`, so an access
-review is a single query rather than a policy-by-policy audit. `DATA_RESIDENCY`
+review is a single query rather than a policy-by-policy audit. `data_residency`
 deliberately does not honour the `'*'` wildcard: "this role may read data from
 every jurisdiction" is not a statement one grant should be able to make.
 
@@ -161,7 +187,7 @@ every jurisdiction" is not a statement one grant should be able to make.
 
 | Policy | Tag driver | Why masking is insufficient |
 |---|---|---|
-| `AGG_HIGHLY_RESTRICTED` | `DATA_CLASSIFICATION = HIGHLY_RESTRICTED` | Forces `MIN_GROUP_SIZE => 25`. Salary bands are analysable in aggregate but must never be resolvable to an individual — a masking policy cannot express a group-size floor. |
+| `AGG_RESTRICTED` | `DATA_CLASSIFICATION = RESTRICTED` | Forces `MIN_GROUP_SIZE => 25`. Salary bands are analysable in aggregate but must never be resolvable to an individual — a masking policy cannot express a group-size floor. |
 | `PROJ_PCI_NO_OUTPUT` | `PCI = YES` | Blocks the column from appearing in output at all while still allowing joins and predicates. PCI-DSS assessors ask for this specifically. |
 
 ## 5.5 Column-level governance and classification
@@ -204,10 +230,11 @@ CONTROL_STATE
 
 | Regime | What the framework provides |
 |---|---|
-| **GDPR / CCPA / LGPD** | `PII` + `SENSITIVE_DATA` locate personal data for DSAR and erasure; `DATA_RESIDENCY` governs transfer; `RETENTION_CLASS` evidences storage limitation; `TAG_CHANGE_LOG` evidences accountability (Art. 5(2)) |
-| **HIPAA** | `PHI` scopes ePHI; masking policies implement minimum-necessary; `PHI_UNMASKED` grants are the access log |
-| **PCI-DSS** | `PCI` scopes the CDE; masking + projection policies implement Req. 3.4; `SP_DETECT_POLICY_DRIFT` evidences Req. 10 monitoring |
-| **SOX** | `CRITICALITY` + `DATA_OWNER` establish control ownership; `TAG_CHANGE_LOG` gives immutable change evidence |
+| **GDPR / CCPA** | `data_classification_regulatory ∈ {PII, SPII}` locates personal data for DSAR and erasure; `data_residency` governs transfer; `retention_class` evidences storage limitation; `TAG_CHANGE_LOG` evidences accountability |
+| **HIPAA** | `data_classification_regulatory = PHI` scopes ePHI; masking policies implement minimum-necessary; `PHI_UNMASKED` grants are the access log |
+| **PCI-DSS** | `data_classification_regulatory = PCI` scopes the CDE; masking + projection policies implement Req. 3.4; XR-003 keeps cardholder data out of unassessed environments; `SP_DETECT_POLICY_DRIFT` evidences Req. 10 monitoring |
+| **SOX** | `regulation = SOX` plus `criticality` and `data_owner` establish control ownership; `TAG_CHANGE_LOG` gives immutable change evidence |
+| **NERC CIP** | `regulation = NERC_CIP` scopes operational-technology data; `operating_company` and `data_residency` bound where it may be replicated |
 | **Internal** | `COMPLIANCE_SCORE_HISTORY` gives the trend; `TAG_EXCEPTION` gives the risk-acceptance register |
 
 The framework's strongest compliance claim is not coverage — it is that

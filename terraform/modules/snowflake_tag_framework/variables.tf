@@ -43,26 +43,48 @@ variable "tags" {
 }
 
 variable "environment" {
-  description = "Environment of this Snowflake account. Sets ENVIRONMENT on framework-owned objects."
+  description = "Environment of this Snowflake account. Sets environment on framework-owned objects."
   type        = string
 
   validation {
-    condition     = contains(["DEV", "TEST", "UAT", "PROD", "SANDBOX", "DR"], var.environment)
-    error_message = "environment must be one of the ENVIRONMENT tag's allowed values."
+    condition     = contains(["PRD", "UAT", "TST", "DEV", "TRAINING", "BACKUP"], var.environment)
+    error_message = "environment must be one of the environment tag's allowed values."
   }
 }
 
-variable "platform_business_unit" {
-  description = "BUSINESS_UNIT charged for the governance platform itself."
-  type        = string
-}
-
-variable "platform_cost_center" {
-  description = "COST_CENTER charged for the governance platform itself."
+# The governance platform tags itself. If the framework's own infrastructure is
+# unallocated in the cost report, nobody else will believe the allocation either.
+variable "platform_operating_company" {
+  description = "operating_company charged for the governance platform itself."
   type        = string
 
   validation {
-    condition     = can(regex("^CC-[0-9]{4,8}$", var.platform_cost_center))
-    error_message = "platform_cost_center must match the COST_CENTER tag format, e.g. CC-004120."
+    condition     = can(regex("^(OPCO_[A-Z0-9_]{2,48}|SHARED)$", var.platform_operating_company))
+    error_message = "platform_operating_company must match the operating_company tag format."
+  }
+}
+
+variable "platform_department" {
+  description = "department charged for the governance platform itself."
+  type        = string
+}
+
+variable "platform_team" {
+  description = "team accountable for building and running the governance platform."
+  type        = string
+
+  validation {
+    condition     = can(regex("^team-[a-z0-9][a-z0-9-]{1,48}$", var.platform_team))
+    error_message = "platform_team must match team-<lowercase>, e.g. team-data-governance."
+  }
+}
+
+variable "platform_application" {
+  description = "application (CMDB id) of the governance platform."
+  type        = string
+
+  validation {
+    condition     = can(regex("^app-[a-z0-9][a-z0-9-]{1,48}$", var.platform_application))
+    error_message = "platform_application must match app-<id>, e.g. app-tag-governance."
   }
 }

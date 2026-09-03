@@ -39,9 +39,11 @@ module "tag_framework" {
   catalog_version     = var.catalog_version
   tags                = var.tags
 
-  environment            = "PROD"
-  platform_business_unit = "CORPORATE_TECHNOLOGY"
-  platform_cost_center   = "CC-009001"
+  environment                = "PRD"
+  platform_operating_company = "SHARED"
+  platform_department        = "CORPORATE"
+  platform_team              = "team-data-governance"
+  platform_application       = "app-tag-governance"
 }
 
 output "tier1_tags" {

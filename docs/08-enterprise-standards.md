@@ -20,9 +20,9 @@ Two conventions that are easy to get wrong and expensive to fix later:
 
 | Wrong | Right | Why |
 |---|---|---|
-| `IS_PII` / `HAS_PII` / `PII_FLAG` | `PII` | Three names for one concept is the origin of every duplicated tag |
-| `PROD_DATA_OWNER` | `DATA_OWNER` + `ENVIRONMENT` | Encoding a dimension in the name guarantees one tag per value of that dimension |
-| `NO_LEGAL_HOLD` | `LEGAL_HOLD` | Negative names produce double negatives in policy predicates |
+| `IS_PII` / `HAS_PII` / `PII_FLAG` | `data_classification_regulatory` (PII) | Three names for one concept is the origin of every duplicated tag |
+| `PROD_DATA_OWNER` | `data_owner` + `environment` | Encoding a dimension in the name guarantees one tag per value of that dimension |
+| `NO_LEGAL_HOLD` | `legal_hold` | Negative names produce double negatives in policy predicates |
 | `DATA_CLASSIFICATION_V2` | version the definition, not the name | Consumers must not be broken by a versioning scheme |
 
 ## 8.2 Allowed-values strategy
@@ -70,7 +70,7 @@ that produced it.
 | Tag retired; value removed; ordinal reordered; override rule changed | MAJOR |
 
 **Tag version** (`version` per tag) — SemVer for one tag's definition, so a change
-to `PII` does not imply a change to `COST_CENTER`.
+to `data_classification_regulatory` (PII) does not imply a change to `cost_center`.
 
 **Tag identifiers are never versioned.** No `DATA_CLASSIFICATION_V2`. A tag whose
 meaning changes so much that consumers must be rewritten is a new tag with a new

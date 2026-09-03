@@ -209,7 +209,7 @@ UNION ALL SELECT * FROM TAG_ONLY_OBJECTS;
 --
 --   most-restrictive    the strongest value anywhere in the lineage applies,
 --                       regardless of depth. Correct for controls
---                       (DATA_CLASSIFICATION, PII, CRITICALITY): a column must
+--                       (the two classification tags, CRITICALITY): a column must
 --                       not become less protected than the table it lives in
 --                       just because someone tagged the column later.
 --
@@ -318,31 +318,57 @@ WHERE RN = 1;
 -- no pivoting in the caller. Deliberately limited to Tier 1 - a view with 42
 -- columns is a view nobody reads.
 CREATE OR REPLACE VIEW VW_OBJECT_TAG_PROFILE
-COMMENT = 'One row per object with the Tier 1 enterprise tags resolved and pivoted.'
+COMMENT = 'One row per object with the Tier 1 allocation hierarchy plus the governance tags every consumer joins to.'
 AS
+-- The shape almost every consumer actually wants: joinable, one row per object,
+-- no pivoting in the caller.
+--
+-- Columns are the Tier 1 allocation hierarchy in hierarchy order, then the small
+-- set of Tier 2 tags that reporting, security and FinOps all need. Deliberately
+-- NOT all 40 tags - a view with forty columns is a view nobody reads, and the
+-- long-format VW_EFFECTIVE_TAG is there for the rest.
 SELECT
     OBJECT_DATABASE,
     OBJECT_SCHEMA,
     OBJECT_NAME,
     COLUMN_NAME,
     OBJECT_TYPE,
-    MAX(IFF(TAG_NAME = 'BUSINESS_UNIT',       EFFECTIVE_VALUE, NULL)) AS BUSINESS_UNIT,
-    MAX(IFF(TAG_NAME = 'DOMAIN',              EFFECTIVE_VALUE, NULL)) AS DOMAIN,
+
+    -- Tier 1 - the published allocation hierarchy
+    MAX(IFF(TAG_NAME = 'OPERATING_COMPANY', EFFECTIVE_VALUE, NULL)) AS OPERATING_COMPANY,
+    MAX(IFF(TAG_NAME = 'DEPARTMENT',        EFFECTIVE_VALUE, NULL)) AS DEPARTMENT,
+    MAX(IFF(TAG_NAME = 'DOMAIN',            EFFECTIVE_VALUE, NULL)) AS DOMAIN,
+    MAX(IFF(TAG_NAME = 'TEAM',              EFFECTIVE_VALUE, NULL)) AS TEAM,
+    MAX(IFF(TAG_NAME = 'APPLICATION',       EFFECTIVE_VALUE, NULL)) AS APPLICATION,
+    MAX(IFF(TAG_NAME = 'WORKLOAD_TYPE',     EFFECTIVE_VALUE, NULL)) AS WORKLOAD_TYPE,
+    MAX(IFF(TAG_NAME = 'OWNER_USER',        EFFECTIVE_VALUE, NULL)) AS OWNER_USER,
+    MAX(IFF(TAG_NAME = 'ENVIRONMENT',       EFFECTIVE_VALUE, NULL)) AS ENVIRONMENT,
+    MAX(IFF(TAG_NAME = 'DATA_CLASSIFICATION_ENTERPRISE', EFFECTIVE_VALUE, NULL))
+        AS DATA_CLASSIFICATION_ENTERPRISE,
+    MAX(IFF(TAG_NAME = 'DATA_CLASSIFICATION_REGULATORY', EFFECTIVE_VALUE, NULL))
+        AS DATA_CLASSIFICATION_REGULATORY,
+
+    -- Tier 2 - the governance tags reporting and enforcement join to
     MAX(IFF(TAG_NAME = 'DATA_PRODUCT',        EFFECTIVE_VALUE, NULL)) AS DATA_PRODUCT,
     MAX(IFF(TAG_NAME = 'DATA_OWNER',          EFFECTIVE_VALUE, NULL)) AS DATA_OWNER,
     MAX(IFF(TAG_NAME = 'DATA_STEWARD',        EFFECTIVE_VALUE, NULL)) AS DATA_STEWARD,
     MAX(IFF(TAG_NAME = 'SUPPORT_GROUP',       EFFECTIVE_VALUE, NULL)) AS SUPPORT_GROUP,
-    MAX(IFF(TAG_NAME = 'DATA_CLASSIFICATION', EFFECTIVE_VALUE, NULL)) AS DATA_CLASSIFICATION,
-    MAX(IFF(TAG_NAME = 'PII',                 EFFECTIVE_VALUE, NULL)) AS PII,
-    MAX(IFF(TAG_NAME = 'ENVIRONMENT',         EFFECTIVE_VALUE, NULL)) AS ENVIRONMENT,
-    MAX(IFF(TAG_NAME = 'DATA_LIFECYCLE',      EFFECTIVE_VALUE, NULL)) AS DATA_LIFECYCLE,
-    MAX(IFF(TAG_NAME = 'CRITICALITY',         EFFECTIVE_VALUE, NULL)) AS CRITICALITY,
     MAX(IFF(TAG_NAME = 'COST_CENTER',         EFFECTIVE_VALUE, NULL)) AS COST_CENTER,
+    MAX(IFF(TAG_NAME = 'CRITICALITY',         EFFECTIVE_VALUE, NULL)) AS CRITICALITY,
+    MAX(IFF(TAG_NAME = 'DATA_LIFECYCLE',      EFFECTIVE_VALUE, NULL)) AS DATA_LIFECYCLE,
     MAX(IFF(TAG_NAME = 'RETENTION_CLASS',     EFFECTIVE_VALUE, NULL)) AS RETENTION_CLASS,
+    MAX(IFF(TAG_NAME = 'LEGAL_HOLD',          EFFECTIVE_VALUE, NULL)) AS LEGAL_HOLD,
     MAX(IFF(TAG_NAME = 'REGULATION',          EFFECTIVE_VALUE, NULL)) AS REGULATION,
+    MAX(IFF(TAG_NAME = 'SLA_TIER',            EFFECTIVE_VALUE, NULL)) AS SLA_TIER,
     MAX(IFF(TAG_NAME = 'MASKING_REQUIRED',    EFFECTIVE_VALUE, NULL)) AS MASKING_REQUIRED,
     MAX(IFF(TAG_NAME = 'ROW_ACCESS_REQUIRED', EFFECTIVE_VALUE, NULL)) AS ROW_ACCESS_REQUIRED,
-    MAX(IFF(TAG_NAME = 'SLA_TIER',            EFFECTIVE_VALUE, NULL)) AS SLA_TIER
+    MAX(IFF(TAG_NAME = 'DATA_RESIDENCY',      EFFECTIVE_VALUE, NULL)) AS DATA_RESIDENCY,
+
+    -- Convenience flag. "Is there regulated data here" is asked far more often
+    -- than any specific category, and expressing it once here keeps the
+    -- COALESCE out of a dozen downstream views.
+    (COALESCE(MAX(IFF(TAG_NAME = 'DATA_CLASSIFICATION_REGULATORY',
+                      EFFECTIVE_VALUE, NULL)), 'NONE') <> 'NONE') AS IS_REGULATED
 FROM VW_EFFECTIVE_TAG
 GROUP BY 1, 2, 3, 4, 5;
 

@@ -4,16 +4,25 @@
 -- -----------------------------------------------------------------------------
 -- ARCHITECTURE
 -- ------------
--- Exactly one tag (DATA_CLASSIFICATION) carries masking attachments. Because
--- DATA_CLASSIFICATION is mandatory on every table and view, tag lineage puts one
--- of these policies on every column of a matching data type in the estate. The
--- policy body then branches on the finer-grained signals - PII, PHI, PCI,
--- SENSITIVE_DATA - read from the column itself.
+-- Exactly one tag (DATA_CLASSIFICATION_ENTERPRISE) carries masking attachments.
+-- Because it is mandatory on every table and view, tag lineage puts one of these
+-- policies on every column of a matching data type in the estate. The policy body
+-- then branches on DATA_CLASSIFICATION_REGULATORY - the finer-grained signal read
+-- from the column itself.
 --
--- Why not a policy per privacy tag: a column tagged both PII and RESTRICTED
+-- Why not a policy on each classification tag: a column tagged RESTRICTED and PCI
 -- would then have two candidate policies for the same data type, and which one
 -- won would depend on tag-lineage proximity rather than on which is the stronger
 -- control. Single attachment removes that class of ambiguity.
+--
+-- REGULATORY CATEGORY IS ORDERED
+-- ------------------------------
+-- DATA_CLASSIFICATION_REGULATORY holds the GOVERNING category:
+--     NONE < PII < SPII < PHI < PCI
+-- so the branches below are written most-stringent-first and the first match
+-- wins. A column that is both PII and PCI carries PCI, and PCI handling is a
+-- superset of what the privacy regime requires - which is why one value can
+-- safely drive the control.
 --
 -- FAIL-CLOSED
 -- -----------
@@ -52,7 +61,7 @@ CREATE MASKING POLICY IF NOT EXISTS MP_ENTERPRISE_STRING
 AS (VAL STRING) RETURNS STRING ->
     CASE
         -- 1. Cardholder data: strictest. Reveal last four only to PCI holders.
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.PCI'), 'NO') = 'YES'
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'PCI'
             THEN CASE
                 WHEN IS_ROLE_IN_SESSION('PCI_UNMASKED') THEN VAL
                 WHEN VAL IS NULL OR LENGTH(VAL) < 4 THEN '****'
@@ -60,7 +69,7 @@ AS (VAL STRING) RETURNS STRING ->
             END
 
         -- 2. Protected health information.
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.PHI'), 'NO') = 'YES'
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'PHI'
             THEN CASE
                 WHEN IS_ROLE_IN_SESSION('PHI_UNMASKED') THEN VAL
                 WHEN IS_ROLE_IN_SESSION('PSEUDONYM_ANALYST')
@@ -68,19 +77,19 @@ AS (VAL STRING) RETURNS STRING ->
                 ELSE '***PHI REDACTED***'
             END
 
-        -- 3. GDPR Art. 9 special categories - never partially revealed, because
-        --    a partial reveal of a special category is still a disclosure.
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.SENSITIVE_DATA'), 'NO') = 'YES'
+        -- 3. Sensitive PII (SSN, financial account, biometric) - never
+        --    partially revealed, because a partial reveal of an SPII element is
+        --    still a disclosure of the element.
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'SPII'
             THEN CASE
-                WHEN IS_ROLE_IN_SESSION('PII_UNMASKED')
-                     AND IS_ROLE_IN_SESSION('HIGHLY_RESTRICTED_DATA_READER') THEN VAL
-                ELSE '***SPECIAL CATEGORY***'
+                WHEN IS_ROLE_IN_SESSION('SPII_UNMASKED') THEN VAL
+                ELSE '***SPII REDACTED***'
             END
 
         -- 4. General PII. Pseudonymised for analysts so cohort analysis and
         --    joins survive masking - the difference between a privacy control
         --    people work with and one they route around.
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.PII'), 'NO') = 'YES'
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'PII'
             THEN CASE
                 WHEN IS_ROLE_IN_SESSION('PII_UNMASKED') THEN VAL
                 WHEN IS_ROLE_IN_SESSION('PSEUDONYM_ANALYST')
@@ -88,22 +97,20 @@ AS (VAL STRING) RETURNS STRING ->
                 ELSE '***MASKED***'
             END
 
-        -- 5. No privacy flag: fall back to the confidentiality level.
+        -- 5. No regulatory category: fall back to the confidentiality level.
         ELSE CASE COALESCE(
-                SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION'),
+                SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_ENTERPRISE'),
                 'RESTRICTED')                       -- fail closed
+            WHEN 'NONE'         THEN VAL
             WHEN 'PUBLIC'       THEN VAL
             WHEN 'INTERNAL'     THEN VAL
             WHEN 'CONFIDENTIAL' THEN VAL
-            WHEN 'RESTRICTED'   THEN
+            ELSE   -- RESTRICTED, and anything unrecognised
                 CASE WHEN IS_ROLE_IN_SESSION('RESTRICTED_DATA_READER')
                      THEN VAL ELSE '***RESTRICTED***' END
-            ELSE
-                CASE WHEN IS_ROLE_IN_SESSION('HIGHLY_RESTRICTED_DATA_READER')
-                     THEN VAL ELSE '***HIGHLY RESTRICTED***' END
         END
     END
-COMMENT = 'Enterprise masking policy for STRING columns. Attached to the DATA_CLASSIFICATION tag.';
+COMMENT = 'Enterprise masking policy for STRING columns. Attached to the DATA_CLASSIFICATION_ENTERPRISE tag.';
 
 -- =============================================================================
 -- NUMBER
@@ -115,11 +122,11 @@ COMMENT = 'Enterprise masking policy for STRING columns. Attached to the DATA_CL
 CREATE MASKING POLICY IF NOT EXISTS MP_ENTERPRISE_NUMBER
 AS (VAL NUMBER) RETURNS NUMBER ->
     CASE
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.PCI'), 'NO') = 'YES'
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'PCI'
             THEN CASE WHEN IS_ROLE_IN_SESSION('PCI_UNMASKED') THEN VAL ELSE NULL END
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.PHI'), 'NO') = 'YES'
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'PHI'
             THEN CASE WHEN IS_ROLE_IN_SESSION('PHI_UNMASKED') THEN VAL ELSE NULL END
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.PII'), 'NO') = 'YES'
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'PII'
             THEN CASE
                 WHEN IS_ROLE_IN_SESSION('PII_UNMASKED') THEN VAL
                 -- Order-preserving coarsening: analysts keep distribution shape
@@ -128,15 +135,14 @@ AS (VAL NUMBER) RETURNS NUMBER ->
                 ELSE NULL
             END
         ELSE CASE COALESCE(
-                SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION'),
+                SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_ENTERPRISE'),
                 'RESTRICTED')
+            WHEN 'NONE'         THEN VAL
             WHEN 'PUBLIC'       THEN VAL
             WHEN 'INTERNAL'     THEN VAL
             WHEN 'CONFIDENTIAL' THEN VAL
-            WHEN 'RESTRICTED'   THEN
+            ELSE   -- RESTRICTED, and anything unrecognised
                 CASE WHEN IS_ROLE_IN_SESSION('RESTRICTED_DATA_READER') THEN VAL ELSE NULL END
-            ELSE
-                CASE WHEN IS_ROLE_IN_SESSION('HIGHLY_RESTRICTED_DATA_READER') THEN VAL ELSE NULL END
         END
     END
 COMMENT = 'Enterprise masking policy for NUMBER columns. Masks to NULL, never to 0.';
@@ -150,29 +156,27 @@ COMMENT = 'Enterprise masking policy for NUMBER columns. Masks to NULL, never to
 CREATE MASKING POLICY IF NOT EXISTS MP_ENTERPRISE_DATE
 AS (VAL DATE) RETURNS DATE ->
     CASE
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.PHI'), 'NO') = 'YES'
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'PHI'
             THEN CASE
                 WHEN IS_ROLE_IN_SESSION('PHI_UNMASKED') THEN VAL
                 ELSE DATE_TRUNC('YEAR', VAL)
             END
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.PII'), 'NO') = 'YES'
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'PII'
             THEN CASE
                 WHEN IS_ROLE_IN_SESSION('PII_UNMASKED') THEN VAL
                 WHEN IS_ROLE_IN_SESSION('PSEUDONYM_ANALYST') THEN DATE_TRUNC('MONTH', VAL)
                 ELSE DATE_TRUNC('YEAR', VAL)
             END
         ELSE CASE COALESCE(
-                SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION'),
+                SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_ENTERPRISE'),
                 'RESTRICTED')
+            WHEN 'NONE'         THEN VAL
             WHEN 'PUBLIC'       THEN VAL
             WHEN 'INTERNAL'     THEN VAL
             WHEN 'CONFIDENTIAL' THEN VAL
-            WHEN 'RESTRICTED'   THEN
+            ELSE   -- RESTRICTED, and anything unrecognised
                 CASE WHEN IS_ROLE_IN_SESSION('RESTRICTED_DATA_READER')
                      THEN VAL ELSE DATE_TRUNC('MONTH', VAL) END
-            ELSE
-                CASE WHEN IS_ROLE_IN_SESSION('HIGHLY_RESTRICTED_DATA_READER')
-                     THEN VAL ELSE NULL END
         END
     END
 COMMENT = 'Enterprise masking policy for DATE columns. Generalises rather than nulls where possible.';
@@ -183,10 +187,10 @@ COMMENT = 'Enterprise masking policy for DATE columns. Generalises rather than n
 CREATE MASKING POLICY IF NOT EXISTS MP_ENTERPRISE_TIMESTAMP_NTZ
 AS (VAL TIMESTAMP_NTZ) RETURNS TIMESTAMP_NTZ ->
     CASE
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.PHI'), 'NO') = 'YES'
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'PHI'
             THEN CASE WHEN IS_ROLE_IN_SESSION('PHI_UNMASKED')
                       THEN VAL ELSE DATE_TRUNC('DAY', VAL) END
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.PII'), 'NO') = 'YES'
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'PII'
             THEN CASE
                 WHEN IS_ROLE_IN_SESSION('PII_UNMASKED') THEN VAL
                 -- Hour truncation defeats timing-based re-identification while
@@ -194,17 +198,15 @@ AS (VAL TIMESTAMP_NTZ) RETURNS TIMESTAMP_NTZ ->
                 ELSE DATE_TRUNC('HOUR', VAL)
             END
         ELSE CASE COALESCE(
-                SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION'),
+                SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_ENTERPRISE'),
                 'RESTRICTED')
+            WHEN 'NONE'         THEN VAL
             WHEN 'PUBLIC'       THEN VAL
             WHEN 'INTERNAL'     THEN VAL
             WHEN 'CONFIDENTIAL' THEN VAL
-            WHEN 'RESTRICTED'   THEN
+            ELSE   -- RESTRICTED, and anything unrecognised
                 CASE WHEN IS_ROLE_IN_SESSION('RESTRICTED_DATA_READER')
                      THEN VAL ELSE DATE_TRUNC('DAY', VAL) END
-            ELSE
-                CASE WHEN IS_ROLE_IN_SESSION('HIGHLY_RESTRICTED_DATA_READER')
-                     THEN VAL ELSE NULL END
         END
     END
 COMMENT = 'Enterprise masking policy for TIMESTAMP_NTZ columns.';
@@ -219,27 +221,25 @@ COMMENT = 'Enterprise masking policy for TIMESTAMP_NTZ columns.';
 CREATE MASKING POLICY IF NOT EXISTS MP_ENTERPRISE_VARIANT
 AS (VAL VARIANT) RETURNS VARIANT ->
     CASE
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.PCI'), 'NO') = 'YES'
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'PCI'
             THEN CASE WHEN IS_ROLE_IN_SESSION('PCI_UNMASKED')
                       THEN VAL ELSE TO_VARIANT('***PCI REDACTED***') END
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.PHI'), 'NO') = 'YES'
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'PHI'
             THEN CASE WHEN IS_ROLE_IN_SESSION('PHI_UNMASKED')
                       THEN VAL ELSE TO_VARIANT('***PHI REDACTED***') END
-        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.PII'), 'NO') = 'YES'
+        WHEN COALESCE(SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_REGULATORY'), 'NONE') = 'PII'
             THEN CASE WHEN IS_ROLE_IN_SESSION('PII_UNMASKED')
                       THEN VAL ELSE TO_VARIANT('***MASKED***') END
         ELSE CASE COALESCE(
-                SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION'),
+                SYSTEM$GET_TAG_ON_CURRENT_COLUMN('GOVERNANCE.TAGS.DATA_CLASSIFICATION_ENTERPRISE'),
                 'RESTRICTED')
+            WHEN 'NONE'         THEN VAL
             WHEN 'PUBLIC'       THEN VAL
             WHEN 'INTERNAL'     THEN VAL
             WHEN 'CONFIDENTIAL' THEN VAL
-            WHEN 'RESTRICTED'   THEN
+            ELSE   -- RESTRICTED, and anything unrecognised
                 CASE WHEN IS_ROLE_IN_SESSION('RESTRICTED_DATA_READER')
                      THEN VAL ELSE TO_VARIANT('***RESTRICTED***') END
-            ELSE
-                CASE WHEN IS_ROLE_IN_SESSION('HIGHLY_RESTRICTED_DATA_READER')
-                     THEN VAL ELSE TO_VARIANT('***HIGHLY RESTRICTED***') END
         END
     END
 COMMENT = 'Enterprise masking policy for VARIANT columns. All-or-nothing: partial redaction of unknown JSON cannot be assured.';

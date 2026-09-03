@@ -95,22 +95,24 @@ AS
 SELECT
     p.DATA_PRODUCT,
     p.DOMAIN,
-    p.BUSINESS_UNIT,
+    p.OPERATING_COMPANY,
+    p.DEPARTMENT,
     p.OBJECT_DATABASE                                AS PRODUCT_DATABASE,
     p.OBJECT_NAME                                    AS PRODUCT_SCHEMA,
     p.DATA_OWNER,
     p.DATA_STEWARD,
     p.SLA_TIER,
-    p.DATA_CLASSIFICATION,
+    p.DATA_CLASSIFICATION_ENTERPRISE,
     p.DATA_LIFECYCLE,
     p.CRITICALITY,
     p.REGULATION,
+    p.DATA_CLASSIFICATION_REGULATORY,
     e_type.EFFECTIVE_VALUE                           AS DATA_PRODUCT_TYPE,
     e_qual.EFFECTIVE_VALUE                           AS DATA_QUALITY_TIER,
     e_dpo.EFFECTIVE_VALUE                            AS DATA_PRODUCT_OWNER,
     -- Consumers need to know whether a product contains regulated data before
     -- they request access, not after their request is refused.
-    (p.PII = 'YES')                                  AS CONTAINS_PII,
+    p.IS_REGULATED                                   AS CONTAINS_REGULATED_DATA,
     obj.N_TABLES,
     obj.N_VIEWS
 FROM VW_OBJECT_TAG_PROFILE p
@@ -151,6 +153,8 @@ COMMENT = 'Adoption, distinct-value spread and staleness per tag. The input to q
 AS
 SELECT
     tc.TAG_NAME,
+    tc.CANONICAL_KEY,
+    tc.HIERARCHY_LEVEL,
     tc.TIER,
     tc.CATEGORY,
     tc.STATUS,
@@ -176,7 +180,7 @@ SELECT
 FROM GOVERNANCE.CONTROL.TAG_CATALOG tc
 LEFT JOIN VW_TAG_ASSIGNMENT a           ON a.TAG_NAME = tc.TAG_NAME
 LEFT JOIN GOVERNANCE.CONTROL.TAG_CHANGE_LOG cl ON cl.TAG_NAME = tc.TAG_NAME
-GROUP BY 1, 2, 3, 4, 5, 6, tc.VALUE_SOURCE;
+GROUP BY 1, 2, 3, 4, 5, 6, 7, 8, tc.VALUE_SOURCE;
 
 -- -----------------------------------------------------------------------------
 -- Audit evidence pack.
@@ -193,9 +197,9 @@ SELECT
     p.OBJECT_NAME,
     p.OBJECT_TYPE,
     p.REGULATION                                     AS GOVERNING_REGULATION,
+    p.DATA_CLASSIFICATION_REGULATORY                 AS GOVERNING_CATEGORY,
     scope.ALL_REGULATIONS,
-    p.DATA_CLASSIFICATION,
-    p.PII,
+    p.DATA_CLASSIFICATION_ENTERPRISE,
     p.RETENTION_CLASS,
     p.DATA_OWNER,
     p.DATA_STEWARD,
@@ -209,7 +213,7 @@ SELECT
             THEN 'GAP: row access declared but not enforced'
         WHEN p.PII = 'YES' AND COALESCE(mask.N_MASKED_COLUMNS, 0) = 0
             THEN 'GAP: PII present but no column carries a masking policy'
-        WHEN p.DATA_CLASSIFICATION IS NULL
+        WHEN p.DATA_CLASSIFICATION_ENTERPRISE IS NULL
             THEN 'GAP: object is unclassified'
         ELSE 'CONTROLS ALIGNED'
     END                                              AS CONTROL_STATE

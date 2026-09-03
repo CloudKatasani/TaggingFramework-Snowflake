@@ -26,7 +26,7 @@ per tag and the quarterly review retires the `UNUSED` and `MARGINAL` ones.
 
 ### AP-02 · Free text where a vocabulary belongs
 
-**Symptom.** `COST_CENTER` contains `CC-1234`, `cc1234`, `1234`, `Marketing` and
+**Symptom.** `cost_center` contains `CC-1234`, `cc1234`, `1234`, `Marketing` and
 `TBD`. The chargeback report shows five cost centres where there is one.
 
 **Why it happens.** Free text is faster to ship and never rejects an input.
@@ -43,7 +43,7 @@ is a comment field, not a tag.
 
 ### AP-03 · Tagging every column
 
-**Symptom.** A mandate that every column carries `DATA_CLASSIFICATION`. Three
+**Symptom.** A mandate that every column carries `data_classification_enterprise`. Three
 hundred million findings. The programme is abandoned in month four.
 
 **Why it happens.** Column level is where masking happens, so it feels like the
@@ -112,18 +112,18 @@ production cost centre. The promotion gate believes UAT objects passed productio
 review.
 
 **Why it happens.** `CLONE` copies tags, which is correct for almost every tag and
-exactly wrong for `ENVIRONMENT`.
+exactly wrong for `environment`.
 
 **Mitigation.** `SP_REMEDIATE_CLONE_TAGS` as a mandatory final step of every clone
-runbook; `ENVIRONMENT` has `override_rule: none` so the value cannot be
-locally patched around. `DATA_QUALITY_TIER` carried in by clone raises a finding —
+runbook; `environment` has `override_rule: none` so the value cannot be
+locally patched around. `data_quality_tier` carried in by clone raises a finding —
 certification is earned, not copied (§4.6).
 
 ---
 
 ### AP-08 · Classification by classifier alone
 
-**Symptom.** `PII` is whatever Snowflake's classifier last decided. A steward's
+**Symptom.** `data_classification_regulatory` (PII) is whatever Snowflake's classifier last decided. A steward's
 considered override is reverted overnight. Encoded identifiers and free-text notes
 containing personal data are never flagged.
 
@@ -184,7 +184,7 @@ percentage, because the two numbers only mean something together (§8.5).
 
 **Symptom.** Every steward holds `APPLY TAG ON ACCOUNT` — because Snowflake offers
 no narrower scope — and can therefore retag any object in the account, including
-another domain's `HIGHLY_RESTRICTED` columns.
+another domain's `RESTRICTED` columns.
 
 **Why it happens.** It is the only way to let stewards do their job with raw
 grants, and Snowflake provides no database-scoped alternative.
@@ -207,7 +207,7 @@ into an untagged table. Masking does not follow. The copy is shared externally.
 tables within 24 hours, and the classifier re-detects the PII in the same window.
 CI/CD tags objects at creation for anything deployed through the pipeline.
 Ad-hoc CTAS in a personal schema remains a genuine residual risk, which is why
-`SANDBOX` databases are excluded from sharing eligibility entirely (§4.5).
+non-production databases are excluded from sharing eligibility entirely (§4.5).
 
 ---
 
@@ -218,9 +218,49 @@ Ad-hoc CTAS in a personal schema remains a genuine residual risk, which is why
 **Why it happens.** A single account-wide percentage is the easiest number to
 produce and the easiest to report upward.
 
-**Mitigation.** `COMPLIANCE_SCORE_HISTORY` records coverage by `BUSINESS_UNIT` and
-`DOMAIN`, not only account-wide, and `VW_COMPLIANCE_DASHBOARD` shows the 30-day
+**Mitigation.** `COMPLIANCE_SCORE_HISTORY` records coverage by `operating_company` and
+`domain`, not only account-wide, and `VW_COMPLIANCE_DASHBOARD` shows the 30-day
 delta per scope. A stalled domain is visible rather than averaged away.
+
+---
+
+### AP-16 · Split classification without a contradiction check
+
+**Symptom.** A table is tagged `data_classification_regulatory = PCI` and
+`data_classification_enterprise = PUBLIC`. Both mandatory tags are present, so
+coverage reports 100%. The masking policy reads the enterprise classification,
+sees `PUBLIC`, and returns cardholder data in clear.
+
+**Why it happens.** Splitting classification into an enterprise level and a
+regulatory category is the right model — they answer different questions — but it
+creates a state where two individually-valid values are jointly impossible. Every
+coverage metric is blind to it, because coverage metrics count presence.
+
+**Cost.** The worst combination available: a real exposure that reports as fully
+compliant. It survives audits precisely because the dashboard is green.
+
+**Mitigation (mechanical).** Contradiction rules (§3.3b). XR-001 fires CRITICAL
+on regulated data classified `NONE` or `PUBLIC`; `VW_COMPLIANCE_EVIDENCE`
+surfaces it as its own `CONTROL_STATE`. Conditional rules catch absence,
+contradiction rules catch presence-and-wrong, and a framework with only the first
+kind is blind to this entire class.
+
+---
+
+### AP-17 · One tag key, two platforms, two buckets
+
+**Symptom.** The AWS cost report shows `operating_company` and
+`Operating_Company` as separate dimensions. Snowflake shows one. The
+cross-platform reconciliation is out by 30% and nobody can find where.
+
+**Why it happens.** AWS tag keys are case-sensitive; Snowflake folds unquoted
+identifiers to upper case. A key written inconsistently in Terraform is two tags
+on AWS and one in Snowflake, and neither platform reports an error.
+
+**Mitigation (mechanical).** One canonical lowercase key in the catalog, with the
+folded Snowflake identifier derived rather than typed. `validate_catalog.py`
+fails the build if two canonical keys fold to the same Snowflake identifier, and
+`CONTROL.TAG_CATALOG` stores both forms so each join uses the right one (§12.1).
 
 ---
 

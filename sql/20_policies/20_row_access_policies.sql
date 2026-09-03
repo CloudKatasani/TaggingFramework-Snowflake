@@ -29,9 +29,12 @@ USE DATABASE GOVERNANCE;
 USE SCHEMA POLICIES;
 
 -- -----------------------------------------------------------------------------
--- RAP_BUSINESS_UNIT_SCOPE
+-- RAP_OPERATING_COMPANY_SCOPE
 -- -----------------------------------------------------------------------------
--- Restricts rows to the business units a session's roles are entitled to.
+-- Restricts rows to the operating companies a session's roles are entitled to.
+-- Operating company is the outermost allocation and jurisdiction boundary, which
+-- makes it the right default axis for row-level scoping: it is the one dimension
+-- every regulated dataset in the estate can be sliced on.
 -- The entitlement table is the single mapping consulted by every row policy, so
 -- an access review is one query rather than a policy-by-policy audit.
 --
@@ -39,21 +42,21 @@ USE SCHEMA POLICIES;
 -- row, so the EXISTS lookup is evaluated once against a small table. Keep
 -- ROW_ACCESS_ENTITLEMENT narrow - it is on the critical path of every scan of
 -- every protected table in the account.
-CREATE ROW ACCESS POLICY IF NOT EXISTS RAP_BUSINESS_UNIT_SCOPE
-AS (BUSINESS_UNIT STRING) RETURNS BOOLEAN ->
+CREATE ROW ACCESS POLICY IF NOT EXISTS RAP_OPERATING_COMPANY_SCOPE
+AS (OPERATING_COMPANY STRING) RETURNS BOOLEAN ->
     -- Full-estate roles bypass the lookup entirely.
     IS_ROLE_IN_SESSION('TAG_ADMIN')
     OR IS_ROLE_IN_SESSION('COMPLIANCE_AUDITOR')
     OR EXISTS (
         SELECT 1
         FROM GOVERNANCE.CONTROL.ROW_ACCESS_ENTITLEMENT e
-        WHERE e.DIMENSION = 'BUSINESS_UNIT'
+        WHERE e.DIMENSION = 'OPERATING_COMPANY'
           AND e.IS_ACTIVE
           AND (e.EXPIRES_AT IS NULL OR e.EXPIRES_AT > CURRENT_TIMESTAMP())
-          AND (e.DIMENSION_VALUE = BUSINESS_UNIT OR e.DIMENSION_VALUE = '*')
+          AND (e.DIMENSION_VALUE = OPERATING_COMPANY OR e.DIMENSION_VALUE = '*')
           AND IS_ROLE_IN_SESSION(e.ROLE_NAME)
     )
-COMMENT = 'Row-level scoping by business unit, driven by CONTROL.ROW_ACCESS_ENTITLEMENT.';
+COMMENT = 'Row-level scoping by operating company, driven by CONTROL.ROW_ACCESS_ENTITLEMENT.';
 
 -- -----------------------------------------------------------------------------
 -- RAP_DOMAIN_SCOPE
@@ -94,19 +97,19 @@ AS (RESIDENCY_REGION STRING) RETURNS BOOLEAN ->
 COMMENT = 'Row-level scoping by data residency region. Wildcard entitlements are not honoured.';
 
 -- -----------------------------------------------------------------------------
--- AGG_HIGHLY_RESTRICTED - aggregation policy
+-- AGG_RESTRICTED - aggregation policy
 -- -----------------------------------------------------------------------------
--- Some HIGHLY_RESTRICTED datasets should be analysable in aggregate but never
--- row by row (salary bands, health cohorts). An aggregation policy forces a
--- minimum group size, which a masking policy cannot express.
-CREATE AGGREGATION POLICY IF NOT EXISTS AGG_HIGHLY_RESTRICTED
+-- Some RESTRICTED datasets should be analysable in aggregate but never row by
+-- row (salary bands, health cohorts, meter-level consumption). An aggregation
+-- policy forces a minimum group size, which a masking policy cannot express.
+CREATE AGGREGATION POLICY IF NOT EXISTS AGG_RESTRICTED
 AS () RETURNS AGGREGATION_CONSTRAINT ->
     CASE
-        WHEN IS_ROLE_IN_SESSION('HIGHLY_RESTRICTED_DATA_READER')
+        WHEN IS_ROLE_IN_SESSION('RESTRICTED_DATA_READER')
             THEN NO_AGGREGATION_CONSTRAINT()
         ELSE AGGREGATION_CONSTRAINT(MIN_GROUP_SIZE => 25)
     END
-COMMENT = 'Forces a minimum group size of 25 for non-privileged readers of highly restricted data.';
+COMMENT = 'Forces a minimum group size of 25 for non-privileged readers of RESTRICTED data.';
 
 -- -----------------------------------------------------------------------------
 -- PROJ_PCI_COLUMNS - projection policy

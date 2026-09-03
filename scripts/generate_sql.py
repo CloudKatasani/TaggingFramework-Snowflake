@@ -23,8 +23,14 @@ OUT_DIR = os.path.join(C.REPO_ROOT, "sql", "_generated")
 
 
 def _tag_fqn(cat: dict, name: str) -> str:
+    """Fully qualified Snowflake identifier for a tag.
+
+    Canonical keys are lowercase; Snowflake folds unquoted identifiers to upper
+    case, so the DDL is emitted upper-cased to match what ACCOUNT_USAGE returns
+    and what every policy body and join will reference.
+    """
     d = cat["deployment"]
-    return f"{d['governance_database']}.{d['tag_schema']}.{name}"
+    return f"{d['governance_database']}.{d['tag_schema']}.{C.snowflake_name(name)}"
 
 
 def gen_tag_ddl(cat: dict) -> str:
@@ -70,7 +76,11 @@ def _one_tag_ddl(cat: dict, t: dict) -> str:
     name = t["name"]
     fq = _tag_fqn(cat, name)
     comment = C.one_line(t["description"])
-    lines = [f"\n-- {name} (Tier {t['tier']}, {t['category']}) - owner {t['owner_role']}"]
+    lines = [
+        f"\n-- {name}  ->  Snowflake identifier {C.snowflake_name(name)}",
+        f"-- Tier {t['tier']} | {t['level']} | {t['category']} | "
+        f"owner {t['owner_role']} | platforms: {', '.join(t.get('platforms', []))}",
+    ]
 
     allowed = t.get("allowed_values")
     if allowed:
@@ -130,7 +140,8 @@ DELETE FROM TAG_REQUIREMENT;
 DELETE FROM TAG_ALLOWED_VALUE;
 DELETE FROM TAG_POLICY_BINDING;
 DELETE FROM TAG_CONDITIONAL_RULE;
-DELETE FROM REGULATION_PRECEDENCE;
+DELETE FROM TAG_CONTRADICTION_RULE;
+DELETE FROM VALUE_PRECEDENCE;
 DELETE FROM TAG_CATALOG;
 """.rstrip())
 
@@ -141,7 +152,15 @@ DELETE FROM TAG_CATALOG;
     for t in cat["tags"]:
         ordinals = t.get("ordinal_values")
         rows.append((
+            # Upper-cased: TAG_CATALOG is joined to ACCOUNT_USAGE.TAG_REFERENCES,
+            # which reports the folded Snowflake identifier. Storing the
+            # lowercase canonical key here would make every one of those joins
+            # miss silently.
+            C.sql_str(C.snowflake_name(t)),
             C.sql_str(t["name"]),
+            C.sql_str(t.get("level")),
+            C.sql_str(_json(t.get("platforms", []))),
+            C.sql_str(t.get("hierarchy_requirement")),
             str(t["tier"]),
             C.sql_str(t["category"]),
             C.sql_str(C.one_line(t["description"])),
@@ -158,13 +177,15 @@ DELETE FROM TAG_CATALOG;
             C.sql_str(t.get("deprecates")),
             C.sql_str(cv),
         ))
-    cols = ["TAG_NAME", "TIER", "CATEGORY", "DESCRIPTION", "VALUE_SOURCE",
-            "VALUE_FORMAT_REGEX", "REFERENCE_SET", "INHERITANCE_MODE",
-            "OVERRIDE_RULE", "ORDINAL_VALUES", "DRIVES", "OWNER_ROLE",
-            "TAG_VERSION", "STATUS", "DEPRECATES", "CATALOG_VERSION"]
-    proj = ["c1", "c2::NUMBER(1,0)", "c3", "c4", "c5", "c6", "c7", "c8", "c9",
-            "PARSE_JSON(c10)::ARRAY", "PARSE_JSON(c11)::ARRAY", "c12", "c13",
-            "c14", "c15", "c16"]
+    cols = ["TAG_NAME", "CANONICAL_KEY", "HIERARCHY_LEVEL", "PLATFORMS",
+            "HIERARCHY_REQUIREMENT", "TIER", "CATEGORY", "DESCRIPTION",
+            "VALUE_SOURCE", "VALUE_FORMAT_REGEX", "REFERENCE_SET",
+            "INHERITANCE_MODE", "OVERRIDE_RULE", "ORDINAL_VALUES", "DRIVES",
+            "OWNER_ROLE", "TAG_VERSION", "STATUS", "DEPRECATES", "CATALOG_VERSION"]
+    proj = ["c1", "c2", "c3", "PARSE_JSON(c4)::ARRAY", "c5",
+            "c6::NUMBER(1,0)", "c7", "c8", "c9", "c10", "c11", "c12", "c13",
+            "PARSE_JSON(c14)::ARRAY", "PARSE_JSON(c15)::ARRAY", "c16", "c17",
+            "c18", "c19", "c20"]
     out.append("\n-- TAG_CATALOG")
     out.append(_values_block(rows, cols, proj, "TAG_CATALOG"))
 
@@ -175,7 +196,7 @@ DELETE FROM TAG_CATALOG;
         ordinals = t.get("ordinal_values") or []
         for v in allowed:
             pos = ordinals.index(v) + 1 if v in ordinals else None
-            rows.append((C.sql_str(t["name"]), C.sql_str(v),
+            rows.append((C.sql_str(C.snowflake_name(t)), C.sql_str(v),
                          str(pos) if pos else "NULL"))
     out.append("\n-- TAG_ALLOWED_VALUE")
     out.append(_values_block(
@@ -189,7 +210,8 @@ DELETE FROM TAG_CATALOG;
             level = C.requirement(t, ot)
             if level == "NOT_APPLICABLE":
                 continue  # keep the table to the meaningful surface
-            rows.append((C.sql_str(t["name"]), C.sql_str(ot), C.sql_str(level)))
+            rows.append((C.sql_str(C.snowflake_name(t)), C.sql_str(ot),
+                         C.sql_str(level)))
     out.append("\n-- TAG_REQUIREMENT")
     out.append(_values_block(
         rows, ["TAG_NAME", "OBJECT_TYPE", "REQUIREMENT_LEVEL"],
@@ -203,8 +225,10 @@ DELETE FROM TAG_CATALOG;
             C.sql_str(C.one_line(r["description"])),
             C.sql_str(r["severity"]),
             C.sql_str(_json(r.get("object_types", []))),
-            C.sql_str(_json(r.get("when") or {})),
-            C.sql_str(_json(r.get("then_mandatory", []))),
+            C.sql_str(_json({C.snowflake_name(k): v
+                             for k, v in (r.get("when") or {}).items()})),
+            C.sql_str(_json([C.snowflake_name(t)
+                             for t in r.get("then_mandatory", [])])),
         ))
     out.append("\n-- TAG_CONDITIONAL_RULE")
     out.append(_values_block(
@@ -221,14 +245,15 @@ DELETE FROM TAG_CATALOG;
         for dt in b.get("data_types", []):
             policy = f"{b['policy_prefix']}_{dt}"
             rows.append((
-                C.sql_str(b["tag"]), "NULL", C.sql_str("MASKING"),
+                C.sql_str(C.snowflake_name(b["tag"])), "NULL", C.sql_str("MASKING"),
                 C.sql_str(f"{db}.{d['policy_schema']}.{policy}"),
                 C.sql_str(dt), C.sql_str("TAG_ATTACHED"),
                 C.sql_str(C.one_line(b.get("note"))) if b.get("note") else "NULL",
             ))
     for b in cat.get("row_access_bindings", []):
         rows.append((
-            C.sql_str(b["tag"]), C.sql_str(b.get("value")), C.sql_str("ROW_ACCESS"),
+            C.sql_str(C.snowflake_name(b["tag"])), C.sql_str(b.get("value")),
+            C.sql_str("ROW_ACCESS"),
             C.sql_str(f"{db}.{d['policy_schema']}.{b['policy']}"),
             "NULL", C.sql_str("RECONCILED"),
             C.sql_str(C.one_line(b.get("note"))) if b.get("note") else "NULL",
@@ -240,13 +265,42 @@ DELETE FROM TAG_CATALOG;
          "ATTACH_MODE", "NOTES"],
         ["c1", "c2", "c3", "c4", "c5", "c6", "c7"], "TAG_POLICY_BINDING"))
 
-    # --- REGULATION_PRECEDENCE --------------------------------------------
-    rows = [(C.sql_str(r), str(i + 1), "NULL")
-            for i, r in enumerate(cat.get("regulation_precedence", []))]
-    out.append("\n-- REGULATION_PRECEDENCE")
+    # --- TAG_CONTRADICTION_RULE -------------------------------------------
+    rows = []
+    for r in cat.get("contradiction_rules", []):
+        rows.append((
+            C.sql_str(r["id"]),
+            C.sql_str(C.one_line(r["description"])),
+            C.sql_str(r["severity"]),
+            C.sql_str(C.snowflake_name(r["if_tag"])),
+            C.sql_str(_json(r["if_values"])),
+            C.sql_str(C.snowflake_name(r["then_tag"])),
+            C.sql_str(_json(r["forbidden_values"])),
+        ))
+    out.append("\n-- TAG_CONTRADICTION_RULE")
     out.append(_values_block(
-        rows, ["REGULATION", "PRECEDENCE_ORDER", "NOTES"],
-        ["c1", "c2::NUMBER(3,0)", "c3"], "REGULATION_PRECEDENCE"))
+        rows,
+        ["RULE_ID", "DESCRIPTION", "SEVERITY", "IF_TAG", "IF_VALUES",
+         "THEN_TAG", "FORBIDDEN_VALUES"],
+        ["c1", "c2", "c3", "c4", "PARSE_JSON(c5)::ARRAY", "c6",
+         "PARSE_JSON(c7)::ARRAY"],
+        "TAG_CONTRADICTION_RULE"))
+
+    # --- VALUE_PRECEDENCE -------------------------------------------------
+    # One table for both precedence lists: the governing value of any
+    # single-valued tag that can hold several truths at once resolves the same
+    # way, so it is one mechanism rather than two.
+    rows = []
+    for tag_name, key in (("data_classification_regulatory",
+                           "regulatory_category_precedence"),
+                          ("regulation", "regulation_precedence")):
+        for i, v in enumerate(cat.get(key, [])):
+            rows.append((C.sql_str(C.snowflake_name(tag_name)), C.sql_str(v),
+                         str(i + 1)))
+    out.append("\n-- VALUE_PRECEDENCE")
+    out.append(_values_block(
+        rows, ["TAG_NAME", "TAG_VALUE", "PRECEDENCE_ORDER"],
+        ["c1", "c2", "c3::NUMBER(3,0)"], "VALUE_PRECEDENCE"))
 
     out.append("COMMIT;\n")
     out.append("SELECT COUNT(*) AS tags_registered FROM TAG_CATALOG;\n")
